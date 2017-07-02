@@ -362,7 +362,8 @@ WaitForIoObjectStateEnd:
 KERNEL_API
 PIO_OBJECT_STATE
 IoCreateIoObjectState (
-    BOOL HighPriority
+    BOOL HighPriority,
+    BOOL NonPaged
     )
 
 /*++
@@ -376,6 +377,10 @@ Arguments:
 
     HighPriority - Supplies a boolean indicating whether or not the I/O object
         state should be prepared for high priority events.
+
+    NonPaged - Supplies a boolean indicating whether or not the I/O object
+        state should be allocated from non-paged pool. Default is paged pool
+        (FALSE).
 
 Return Value:
 
@@ -395,8 +400,14 @@ Return Value:
     //
 
     Status = STATUS_INSUFFICIENT_RESOURCES;
-    NewState = MmAllocatePagedPool(sizeof(IO_OBJECT_STATE),
-                                   FILE_OBJECT_ALLOCATION_TAG);
+    if (NonPaged != FALSE) {
+        NewState = MmAllocateNonPagedPool(sizeof(IO_OBJECT_STATE),
+                                          FILE_OBJECT_ALLOCATION_TAG);
+
+    } else {
+        NewState = MmAllocatePagedPool(sizeof(IO_OBJECT_STATE),
+                                       FILE_OBJECT_ALLOCATION_TAG);
+    }
 
     if (NewState == NULL) {
         goto CreateIoObjectStateEnd;
@@ -440,7 +451,7 @@ Return Value:
 CreateIoObjectStateEnd:
     if (!KSUCCESS(Status)) {
         if (NewState != NULL) {
-            IoDestroyIoObjectState(NewState);
+            IoDestroyIoObjectState(NewState, NonPaged);
             NewState = NULL;
         }
     }
@@ -451,7 +462,8 @@ CreateIoObjectStateEnd:
 KERNEL_API
 VOID
 IoDestroyIoObjectState (
-    PIO_OBJECT_STATE State
+    PIO_OBJECT_STATE State,
+    BOOL NonPaged
     )
 
 /*++
@@ -463,6 +475,9 @@ Routine Description:
 Arguments:
 
     State - Supplies a pointer to the I/O object state to destroy.
+
+    NonPaged - Supplies a boolean indicating whether or not the I/O object
+        was allocated from non-paged pool. Default is paged pool (FALSE).
 
 Return Value:
 
@@ -496,7 +511,13 @@ Return Value:
         KeDestroyEvent(State->ErrorEvent);
     }
 
-    MmFreePagedPool(State);
+    if (NonPaged != FALSE) {
+        MmFreeNonPagedPool(State);
+
+    } else {
+        MmFreePagedPool(State);
+    }
+
     return;
 }
 
@@ -709,6 +730,7 @@ IopCreateOrLookupFileObject (
     PFILE_PROPERTIES Properties,
     PDEVICE Device,
     ULONG Flags,
+    ULONG MapFlags,
     PFILE_OBJECT *FileObject,
     PBOOL ObjectCreated
     )
@@ -733,6 +755,9 @@ Arguments:
     Flags - Supplies a bitmask of file object flags. See FILE_OBJECT_FLAG_* for
         definitions.
 
+    MapFlags - Supplies the additional map flags associated with this file
+        object. See MAP_FLAG_* definitions.
+
     FileObject - Supplies a pointer where the file object will be returned on
         success.
 
@@ -752,6 +777,7 @@ Return Value:
     BOOL Created;
     BOOL LockHeld;
     PFILE_OBJECT NewObject;
+    BOOL NonPagedIoState;
     PFILE_OBJECT Object;
     KSTATUS Status;
 
@@ -761,6 +787,7 @@ Return Value:
     Created = FALSE;
     LockHeld = FALSE;
     NewObject = NULL;
+    NonPagedIoState = FALSE;
     Object = NULL;
     while (TRUE) {
 
@@ -802,7 +829,13 @@ Return Value:
                 }
 
                 if ((Flags & FILE_OBJECT_FLAG_EXTERNAL_IO_STATE) == 0) {
-                    NewObject->IoState = IoCreateIoObjectState(FALSE);
+                    if ((Flags & FILE_OBJECT_FLAG_NON_PAGED_IO_STATE) != 0) {
+                        NonPagedIoState = TRUE;
+                    }
+
+                    NewObject->IoState = IoCreateIoObjectState(FALSE,
+                                                               NonPagedIoState);
+
                     if (NewObject->IoState == NULL) {
                         Status = STATUS_INSUFFICIENT_RESOURCES;
                         goto CreateOrLookupFileObjectEnd;
@@ -815,7 +848,19 @@ Return Value:
                     goto CreateOrLookupFileObjectEnd;
                 }
 
+                //
+                // Currently only character devices that want to map their
+                // hardware assets directly are known to need map flags. This
+                // assert catches accidental uninitialized map flags. Remove
+                // this assert if there's a need for other object types to
+                // specify map flags.
+                //
+
+                ASSERT((MapFlags == 0) ||
+                       (Properties->Type == IoObjectCharacterDevice));
+
                 NewObject->Flags = Flags;
+                NewObject->MapFlags = MapFlags;
                 NewObject->Device = Device;
                 ObAddReference(Device);
 
@@ -933,7 +978,7 @@ CreateOrLookupFileObjectEnd:
         }
 
         if (NewObject->IoState != NULL) {
-            IoDestroyIoObjectState(NewObject->IoState);
+            IoDestroyIoObjectState(NewObject->IoState, NonPagedIoState);
         }
 
         if (NewObject->ReadyEvent != NULL) {
@@ -1020,6 +1065,7 @@ Return Value:
     IRP_CLOSE CloseIrp;
     PDEVICE Device;
     IRP_MINOR_CODE MinorCode;
+    BOOL NonPagedIoState;
     ULONG OldCount;
     KSTATUS Status;
 
@@ -1228,7 +1274,12 @@ Return Value:
         if (((Object->Flags & FILE_OBJECT_FLAG_EXTERNAL_IO_STATE) == 0) &&
             (Object->IoState != NULL)) {
 
-            IoDestroyIoObjectState(Object->IoState);
+            NonPagedIoState = FALSE;
+            if ((Object->Flags & FILE_OBJECT_FLAG_NON_PAGED_IO_STATE) != 0) {
+                NonPagedIoState = TRUE;
+            }
+
+            IoDestroyIoObjectState(Object->IoState, NonPagedIoState);
         }
 
         if (Object->ReadyEvent != NULL) {
@@ -1990,12 +2041,12 @@ Return Value:
     ULONG BlockSize;
     ULONGLONG FileSize;
 
-    READ_INT64_SYNC(&(FileObject->Properties.FileSize), &FileSize);
+    FileSize = FileObject->Properties.Size;
     if (FileSize < NewSize) {
 
         ASSERT(KeIsSharedExclusiveLockHeldExclusive(FileObject->Lock));
 
-        WRITE_INT64_SYNC(&(FileObject->Properties.FileSize), NewSize);
+        FileObject->Properties.Size = NewSize;
 
         //
         // TODO: Block count should be managed by the file system.
@@ -2057,7 +2108,7 @@ Return Value:
     // If the new size is the same as the old file size then just exit.
     //
 
-    READ_INT64_SYNC(&(FileObject->Properties.FileSize), &FileSize);
+    FileSize = FileObject->Properties.Size;
     if (FileSize == NewFileSize) {
         Status = STATUS_SUCCESS;
         goto ModifyFileObjectSizeEnd;

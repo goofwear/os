@@ -71,14 +71,23 @@ extern "C" {
 #define _PATH_SHELLS    "/etc/shells"
 #define _PATH_TTY       "/dev/tty"
 #define _PATH_UTMP      "/var/run/utmp"
-#define _PATH_UTMPX     "/var/run/utmpx"
-#define _PATH_WTMP      "/var/run/wtmp"
+#define _PATH_UTMPX     _PATH_UTMP
+#define _PATH_WTMP      "/var/log/wtmp"
+#define _PATH_WTMPX     _PATH_WTMP
 
 #define _PATH_DEV       "/dev/"
 #define _PATH_TMP       "/tmp/"
 #define _PATH_VARDB     "/var/db/"
 #define _PATH_VARRUN    "/var/run/"
 #define _PATH_VARTMP    "/var/tmp/"
+
+//
+// Minoca-specific paths.
+//
+
+#define _PATH_TZ        "/etc/tz"
+#define _PATH_TZALMANAC "/usr/share/tz/tzdata"
+#define _PATH_URANDOM   "/dev/urandom"
 
 //
 // ------------------------------------------------------ Data Type Definitions

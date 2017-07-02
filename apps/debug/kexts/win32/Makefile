@@ -28,7 +28,7 @@
 
 BINARY = kexts.dll
 
-BINARYTYPE = dll
+BINARYTYPE = so
 
 BINPLACE = tools/bin
 
@@ -38,12 +38,12 @@ BUILD = yes
 
 TARGETLIBS = $(OBJROOT)/os/apps/debug/dbgext/win32/dbgextnt.a
 
-X86_OBJS = acpiext.o  \
-           kexts.o    \
-           memory.o   \
-           objects.o  \
-           reslist.o  \
-           threads.o  \
+OBJS = acpiext.o  \
+       kexts.o    \
+       memory.o   \
+       objects.o  \
+       reslist.o  \
+       threads.o  \
 
 include $(SRCROOT)/os/minoca.mk
 

@@ -704,6 +704,7 @@ Return Value:
 OS_API
 KSTATUS
 OsForkProcess (
+    ULONG Flags,
     PPROCESS_ID NewProcessId
     )
 
@@ -715,6 +716,9 @@ Routine Description:
     child process begins executing in the middle of this function.
 
 Arguments:
+
+    Flags - Supplies a bitfield of flags governing the behavior of the newly
+        forked process. See FORK_FLAG_* definitions.
 
     NewProcessId - Supplies a pointer that on success contains the process ID
         of the child process in the parent, and 0 in the child. This value
@@ -730,6 +734,7 @@ Return Value:
 
 {
 
+    SYSTEM_CALL_FORK Parameters;
     INTN Result;
 
     //
@@ -737,7 +742,8 @@ Return Value:
     // child. Or a negative status code to the parent if the fork failed.
     //
 
-    Result = OspSystemCallFull(SystemCallForkProcess, NULL);
+    Parameters.Flags = Flags;
+    Result = OspSystemCallFull(SystemCallForkProcess, &Parameters);
     if (Result < 0) {
         *NewProcessId = -1;
         return (KSTATUS)Result;
@@ -981,6 +987,7 @@ Return Value:
 
         CurrentDirectorySize = Parameters.BufferSize * 2;
         OsHeapFree(CurrentDirectory);
+        CurrentDirectory = NULL;
     }
 
 GetCurrentDirectoryEnd:
@@ -989,7 +996,9 @@ GetCurrentDirectoryEnd:
         *BufferSize = Parameters.BufferSize;
 
     } else {
-        OsHeapFree(CurrentDirectory);
+        if (CurrentDirectory != NULL) {
+            OsHeapFree(CurrentDirectory);
+        }
     }
 
     return Status;
@@ -1554,7 +1563,7 @@ Arguments:
 
     Status - Supplies the exit status, returned to the parent in the wait
         calls. Conventionally 0 indicates success, and non-zero indicates
-        failure. The C library only recieves the first eight bits of the return
+        failure. The C library only receives the first eight bits of the return
         status, portable applications should not set bits beyond that.
 
 Return Value:
@@ -1660,17 +1669,12 @@ Return Value:
     KSTATUS Status;
 
     Request.FieldsToSet = 0;
+    Request.FileProperties = Properties;
     Status = OspGetSetFileInformation(Directory,
                                       Path,
                                       PathLength,
                                       FollowLink,
                                       &Request);
-
-    if (KSUCCESS(Status)) {
-        RtlCopyMemory(Properties,
-                      &(Request.FileProperties),
-                      sizeof(FILE_PROPERTIES));
-    }
 
     return Status;
 }
@@ -3044,7 +3048,7 @@ Arguments:
     Set - Supplies a boolean indicating whether to set the new groups (TRUE) or
         just get the current list of supplementary groups.
 
-    Groups - Supplies a pointer that recieves the supplementary groups for a
+    Groups - Supplies a pointer that receives the supplementary groups for a
         get operation or contains the new group IDs to set for a set operation.
 
     Count - Supplies a pointer that on input contains the number of elements
@@ -3427,7 +3431,7 @@ Return Value:
     RestartAllowed = FALSE;
     SignalHandler = OsSignalHandler;
     if (SignalHandler != NULL) {
-        RestartAllowed = SignalHandler(Parameters);
+        RestartAllowed = SignalHandler(Parameters, Context);
     }
 
     //
@@ -3528,13 +3532,8 @@ Return Value:
     SYSTEM_CALL_GET_SET_FILE_INFORMATION Parameters;
     KSTATUS Status;
 
-    Parameters.Request.FieldsToSet = 0;
-    if (Request->FieldsToSet != 0) {
-        RtlCopyMemory(&(Parameters.Request),
-                      Request,
-                      sizeof(SET_FILE_INFORMATION));
-    }
-
+    Parameters.Request.FieldsToSet = Request->FieldsToSet;
+    Parameters.Request.FileProperties = Request->FileProperties;
     Parameters.Directory = Directory;
     Parameters.FilePath = Path;
     Parameters.FilePathSize = PathSize;

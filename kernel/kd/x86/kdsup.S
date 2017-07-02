@@ -199,7 +199,7 @@ KdpAtomicAdd32Loop:
 END_FUNCTION(KdpAtomicAdd32)
 
 ##
-## BOOL
+## VOID
 ## KdpDisableInterrupts (
 ##     VOID
 ##     )
@@ -226,3 +226,4 @@ FUNCTION(KdpDisableInterrupts)
     ret
 
 END_FUNCTION(KdpDisableInterrupts)
+

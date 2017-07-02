@@ -135,6 +135,7 @@ E1000_DEVICE_ENTRY E1000Devices[] = {
 // ------------------------------------------------------------------ Functions
 //
 
+__USED
 KSTATUS
 DriverEntry (
     PDRIVER Driver
@@ -601,7 +602,7 @@ Return Value:
     Properties.Interface.Send = E1000Send;
     Properties.Interface.GetSetInformation = E1000GetSetInformation;
     Properties.Interface.DestroyLink = E1000DestroyLink;
-    Properties.ChecksumFlags = Device->ChecksumFlags;
+    Properties.Capabilities = Device->SupportedCapabilities;
     Status = NetAddLink(&Properties, &(Device->NetworkLink));
     if (!KSUCCESS(Status)) {
         goto AddNetworkDeviceEnd;

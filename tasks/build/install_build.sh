@@ -102,7 +102,21 @@ _EOS
 
 fi
 
-echo "Running msetup -v $DEBUG_FLAG $AUTO_ROOT_ARGS --autodeploy"
-msetup -v $DEBUG_FLAG $AUTO_ROOT_ARGS --autodeploy
+if [ -r /etc/hostname ]; then
+    cat > ./keep_hostname <<_EOS
+var HostnameCopy = {
+    "Destination": "/apps/etc/hostname",
+    "Source": "/etc/hostname",
+    "SourceVolume": -1,
+};
+
+SystemPartition["Files"] += [HostnameCopy];
+_EOS
+
+AUTO_ROOT_ARGS="$AUTO_ROOT_ARGS --script=./keep_hostname"
+fi
+
+echo "Running msetup -v $DEBUG_FLAG $AUTO_ROOT_ARGS --autodeploy -a3072"
+msetup -v $DEBUG_FLAG $AUTO_ROOT_ARGS --autodeploy -a3072
 echo "Done running setup."
 

@@ -156,7 +156,7 @@ CHAR CkOpcodeStackEffects[CkOpcodeCount] = {
     -1, // CkOpAnd
     -1, // CkOpOr
     -1, // CkOpCloseUpvalue
-    0,  // CkOpReturn
+    -1,  // CkOpReturn
     1,  // CkOpClosure
     -1, // CkOpClass
     -2, // CkOpMethod
@@ -771,7 +771,28 @@ Return Value:
     //
 
     if (Compiler->EnclosingClass == NULL) {
-        CkpDefineVariable(Compiler, Symbol);
+
+        //
+        // If this is the definition for a previous declaration, then put it
+        // in the right place further down the stack.
+        //
+
+        if ((Compiler->ScopeDepth >= 0) &&
+            (Symbol != Compiler->LocalCount - 1)) {
+
+            CK_ASSERT(Symbol < CK_MAX_LOCALS);
+
+            CkpEmitByteOp(Compiler, CkOpStoreLocal, Symbol);
+            CkpEmitOp(Compiler, CkOpPop);
+
+        //
+        // This is a definition with no previous declaration.
+        //
+
+        } else {
+            CkpDefineVariable(Compiler, Symbol);
+        }
+
         return;
     }
 
@@ -1184,7 +1205,7 @@ Return Value:
         Current += 1;
     }
 
-    if (Value >= CK_INT_MAX) {
+    if (Value > CK_INT_MAX) {
         CkpCompileError(Compiler, Token, "Integer too large");
     }
 

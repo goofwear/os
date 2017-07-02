@@ -42,6 +42,10 @@ all:
 ##
 
 OS ?= $(shell uname -s)
+ifneq ($(findstring CYGWIN,$(shell uname -s)),)
+OS := cygwin
+endif
+
 BUILD_ARCH = $(shell uname -m)
 ifeq ($(BUILD_ARCH), $(filter i686 i586,$(BUILD_ARCH)))
 BUILD_ARCH := x86
@@ -55,7 +59,7 @@ else ifeq ($(BUILD_ARCH), $(filter armv7 armv6,$(BUILD_ARCH)))
 BUILD_BFD_ARCH := arm
 BUILD_OBJ_FORMAT := elf32-littlearm
 
-else ifeq ($(BUILD_ARCH), x86_64)
+else ifeq ($(BUILD_ARCH), $(filter x86_64 amd64,$(BUILD_ARCH)))
 BUILD_ARCH := x64
 BUILD_OBJ_FORMAT := elf64-x86-64
 BUILD_BFD_ARCH := i386
@@ -109,6 +113,16 @@ wipe:
 Makefile: ;
 %.mk :: ;
 % :: $(OBJDIR) ; @:
+
+##
+## If the current directory appears to be outside of SRCROOT, then there's a
+## problem. Having a symlink somewhere in SRCROOT causes this.
+##
+
+ifeq ($(CURDIR), $(subst $(SRCROOT),,$(CURDIR)))
+$(error The current directory $(CURDIR) does not appear to be a subdirectory \
+of SRCROOT=$(SRCROOT). Do you have a symlink in SRCROOT?)
+endif
 
 else
 
@@ -208,11 +222,12 @@ INCLUDES += $(SRCROOT)/os/include
 ## Define default CFLAGS if none were specified elsewhere.
 ##
 
+# LTO_OPT ?= -flto
 CFLAGS ?= -Wall -Werror
 ifeq ($(DEBUG),rel)
-CFLAGS += -O2 -Wno-unused-but-set-variable
+CFLAGS += -O2 $(LTO_OPT) -Wno-unused-but-set-variable
 else
-CFLAGS += -O1
+CFLAGS += -O1 $(LTO_OPT)
 endif
 
 ##
@@ -232,10 +247,18 @@ EXTRA_CPPFLAGS_FOR_BUILD := $(EXTRA_CPPFLAGS)
 EXTRA_CFLAGS += -fno-builtin -fno-omit-frame-pointer -g -save-temps=obj \
                 -ffunction-sections -fdata-sections -fvisibility=hidden
 
+ifeq ($(ARCH),x64)
+KERNEL_CFLAGS += -mno-sse -mno-red-zone
+endif
+
 EXTRA_CFLAGS_FOR_BUILD := $(EXTRA_CFLAGS)
 
+ifneq (,$(filter klibrary driver staticapp,$(BINARYTYPE)))
+EXTRA_CFLAGS += $(KERNEL_CFLAGS)
+endif
+
 EXTRA_CFLAGS += -fpic
-ifneq ($(OS),Windows_NT)
+ifneq ($(OS),$(filter Windows_NT cygwin,$(OS)))
 EXTRA_CFLAGS_FOR_BUILD += -fpic
 endif
 
@@ -250,7 +273,7 @@ endif
 ##
 
 ifeq (armv6, $(ARCH))
-ifneq ($(BINARYTYPE), $(filter ntconsole win32 dll,$(BINARYTYPE)))
+ifneq ($(BINARYTYPE), build)
 EXTRA_CPPFLAGS += -march=armv6zk -marm -mfpu=vfp
 endif
 endif
@@ -263,7 +286,7 @@ EXTRA_CFLAGS += -mno-ms-bitfields
 ##
 
 ifeq ($(VARIANT),q)
-ifneq ($(BINARYTYPE), $(filter ntconsole win32 dll,$(BINARYTYPE)))
+ifneq ($(BINARYTYPE), build)
 EXTRA_CPPFLAGS += -Wa,-momit-lock-prefix=yes -march=i586
 endif
 endif
@@ -277,15 +300,6 @@ ifeq ($(OS),Darwin)
 STRIP_FLAGS :=
 else
 STRIP_FLAGS := -p
-endif
-
-##
-## TODO: Either driver should be its own type, or all the driver makefiles
-## should have ENTRY := DriverEntry in them.
-##
-
-ifeq ($(BINARYTYPE)$(BUILD),so)
-ENTRY ?= DriverEntry
 endif
 
 ##
@@ -306,21 +320,25 @@ endif
 ##
 
 ifneq (,$(TEXT_ADDRESS))
-EXTRA_LDFLAGS += -Wl,-Ttext-segment=$(TEXT_ADDRESS) -Wl,-Ttext=$(TEXT_ADDRESS)
+EXTRA_LDFLAGS +=  -Wl,--section-start,.init=$(TEXT_ADDRESS) \
+ -Wl,-Ttext-segment=$(TEXT_ADDRESS)
+
 endif
 
 ifneq (,$(LINKER_SCRIPT))
 EXTRA_LDFLAGS += -T$(LINKER_SCRIPT)
 endif
 
+ifeq ($(BINARYTYPE),driver)
+EXTRA_LDFLAGS += -nostdlib -Wl,--no-undefined
+ENTRY ?= DriverEntry
+BINARYTYPE := so
+endif
+
 ifneq ($(ENTRY),)
 EXTRA_LDFLAGS += -Wl,-e,$(ENTRY)                            \
                  -Wl,-u,$(ENTRY)                            \
 
-endif
-
-ifeq ($(BINARYTYPE),so)
-EXTRA_LDFLAGS += -nodefaultlibs -nostartfiles -nostdlib
 endif
 
 ##
@@ -441,19 +459,7 @@ $(BINARY): $(ALLOBJS) $(TARGETLIBS)
 	@echo Linking - $@
 	@$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(LDFLAGS) $(EXTRA_LDFLAGS) -static -o $@ -Wl,--start-group $^ -Wl,--end-group -Bdynamic $(DYNLIBS)
     endif
-    ifeq ($(BINARYTYPE),ntconsole)
-	@echo Linking - $@
-	@$(CC) -o $@ $^ $(TARGETLIBS) -Bdynamic $(DYNLIBS)
-    endif
-    ifeq ($(BINARYTYPE),win32)
-	@echo Linking - $@
-	@$(CC) -mwindows -o $@ $^ $(TARGETLIBS) -Bdynamic $(DYNLIBS)
-    endif
-    ifeq ($(BINARYTYPE),dll)
-	@echo Linking - $@
-	@$(CC) -shared -o $@ $^ $(TARGETLIBS) -Bdynamic $(DYNLIBS)
-    endif
-    ifeq ($(BINARYTYPE),library)
+    ifneq (,$(filter library klibrary,$(BINARYTYPE)))
 	@echo Building Library - $@
 	@$(AR) rcs $@ $^ $(TARGETLIBS)
     endif
@@ -477,7 +483,11 @@ $(BINARY): $(ALLOBJS) $(TARGETLIBS)
     endif
     ifeq ($(BINARYTYPE),build)
 	@echo Linking - $@
-	@$(CC) $(LDFLAGS) -o $@ $^ $(TARGETLIBS) -Bdynamic $(DYNLIBS)
+	@$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(LDFLAGS) $(EXTRA_LDFLAGS) -o $@ $^ $(TARGETLIBS) -Bdynamic $(DYNLIBS)
+    endif
+    ifeq ($(BINARYTYPE),custom)
+	@echo Building - $@
+	@$(BUILD_COMMAND)
     endif
     ifneq ($(BINPLACE),)
 	@echo Binplacing - $(OUTROOT)/$(BINPLACE)/$(BINARY)

@@ -1336,7 +1336,6 @@ Return Value:
 
     ULONG FrameIndex;
     REGISTERS_UNION LocalRegisters;
-    INT SearchIndex;
     INT Status;
     BOOL Unwind;
 
@@ -1353,6 +1352,7 @@ Return Value:
 
     Unwind = TRUE;
     FrameIndex = 0;
+    Status = 0;
     while (FrameIndex < *FrameCount) {
         Status = DbgStackUnwind(Context,
                                 Registers,
@@ -1367,25 +1367,7 @@ Return Value:
             break;
         }
 
-        //
-        // If the stack frame appears to loop back on itself, stop.
-        //
-
-        for (SearchIndex = 0; SearchIndex < FrameIndex; SearchIndex += 1) {
-            if (Frames[SearchIndex].FramePointer ==
-                Frames[FrameIndex].FramePointer) {
-
-                break;
-            }
-        }
-
         FrameIndex += 1;
-        if (SearchIndex != FrameIndex - 1) {
-            DbgOut("Stack frame loops, frame %I64x.\n",
-                   Frames[FrameIndex].FramePointer);
-
-            break;
-        }
     }
 
     *FrameCount = FrameIndex;
@@ -1451,6 +1433,11 @@ Return Value:
     //
 
     Pc = DbgGetPc(Context, Registers);
+    if (Pc == 0) {
+        Status = EOF;
+        goto StackUnwindEnd;
+    }
+
     if (*Unwind != FALSE) {
         Module = DbgpFindModuleFromAddress(Context, Pc, &DebasedPc);
         if ((Module != NULL) && (Module->Symbols != NULL) &&
@@ -1463,21 +1450,22 @@ Return Value:
             Symbols->RegistersContext = Registers;
             Status = Symbols->Interface->Unwind(Symbols, DebasedPc, Frame);
             Symbols->RegistersContext = NULL;
-            if (Status != 0) {
-                if (Status != ENOENT) {
-                    DbgOut("Failed to unwind stack at PC 0x%I64x\n", Pc);
-                }
-
-            } else {
+            if (Status == 0) {
 
                 //
-                // Set the PC to the return address. For architectures like
-                // x86 this is a no-op. On ARM, the return address register
-                // (r14) is different than the PC (r15).
+                // Ignore the return address from the symbols interface, but
+                // look at how they restored the PC. This is done because
+                // DWARF returns the "return address" register, since that's
+                // all they know. But they may have restored the PC (such as
+                // from a trap frame), which is even better.
                 //
 
-                DbgSetPc(Context, Registers, Frame->ReturnAddress);
+                Frame->ReturnAddress = DbgGetPc(Context, Registers);
                 goto StackUnwindEnd;
+            }
+
+            if (Status != ENOENT) {
+                DbgOut("Failed to unwind stack at PC 0x%I64x\n", Pc);
             }
         }
 
@@ -1667,6 +1655,10 @@ Return Value:
 
         break;
 
+    case MACHINE_TYPE_X64:
+        Status = EINVAL;
+        goto StackUnwindEnd;
+
     default:
 
         assert(FALSE);
@@ -1715,8 +1707,10 @@ Return Value:
     ULONG FrameCount;
     ULONG FrameIndex;
     PSTACK_FRAME Frames;
+    PFUNCTION_SYMBOL Function;
     REGISTERS_UNION LocalRegisters;
     INT Result;
+    PSTR SymbolName;
 
     Frames = NULL;
     if (Registers == NULL) {
@@ -1763,6 +1757,36 @@ Return Value:
 
     DbgOut("Frame    RetAddr  Call Site\n");
     for (FrameIndex = 0; FrameIndex < FrameCount; FrameIndex += 1) {
+        SymbolName = DbgGetAddressSymbol(Context, CallSite, &Function);
+
+        //
+        // If this function is inlined, print out it and its inlined parents as
+        // such.
+        //
+
+        if ((Function != NULL) && (Function->ParentFunction != NULL)) {
+            if (PrintFrameNumbers != FALSE) {
+                DbgOut("   ");
+            }
+
+            DbgOut("<inline>          %s\n", SymbolName);
+            free(SymbolName);
+            SymbolName = NULL;
+            Function = Function->ParentFunction;
+            while (Function->ParentFunction != NULL) {
+                if (PrintFrameNumbers != FALSE) {
+                    DbgOut("   ");
+                }
+
+                DbgOut("<inline>          %s\n", Function->Name);
+                Function = Function->ParentFunction;
+            }
+        }
+
+        //
+        // Now print the real frame.
+        //
+
         if (PrintFrameNumbers != FALSE) {
             DbgOut("%2d ", FrameIndex);
         }
@@ -1771,13 +1795,16 @@ Return Value:
                Frames[FrameIndex].FramePointer,
                Frames[FrameIndex].ReturnAddress);
 
-        //
-        // Attempt to print the call site location with symbols. If nothing was
-        // printed, fall back to printing the raw address.
-        //
+        if (SymbolName != NULL) {
+            DbgOut("%s\n", SymbolName);
+            free(SymbolName);
 
-        DbgPrintAddressSymbol(Context, CallSite);
-        DbgOut("\n");
+        } else if (Function != NULL) {
+            DbgOut("%s\n", Function->Name);
+
+        } else {
+            DbgOut("%s\n");
+        }
 
         //
         // The next stack frame's call site is this frame's return address. Set
@@ -1872,6 +1899,10 @@ Return Value:
         PointerSize = sizeof(ULONG);
         break;
 
+    case MACHINE_TYPE_X64:
+        PointerSize = sizeof(ULONGLONG);
+        break;
+
     default:
         PointerSize = 0;
 
@@ -1907,7 +1938,7 @@ Arguments:
     StackPointer - Supplies an optional pointer where the stack register value
         will be returned.
 
-    FramePointer - Supplies an optional pointer where teh stack frame base
+    FramePointer - Supplies an optional pointer where the stack frame base
         register value will be returned.
 
 Return Value:
@@ -1936,6 +1967,11 @@ Return Value:
             FrameValue = Registers->Arm.R11Fp;
         }
 
+        break;
+
+    case MACHINE_TYPE_X64:
+        StackValue = Registers->X64.Rsp;
+        FrameValue = Registers->X64.Rbp;
         break;
 
     default:
@@ -2001,6 +2037,10 @@ Return Value:
         Value = Registers->Arm.R15Pc;
         break;
 
+    case MACHINE_TYPE_X64:
+        Value = Registers->X64.Rip;
+        break;
+
     default:
 
         assert(FALSE);
@@ -2054,6 +2094,10 @@ Return Value:
 
     case MACHINE_TYPE_ARM:
         Registers->Arm.R15Pc = Value;
+        break;
+
+    case MACHINE_TYPE_X64:
+        Registers->X64.Rip = Value;
         break;
 
     default:
@@ -2729,7 +2773,7 @@ Return Value:
             AccessString = "Write";
         }
 
-        printf("%s %d bytes at address %08I64x.\n",
+        printf("%s %d bytes at address %08llx.\n",
                AccessString,
                BufferSize,
                Address);
@@ -3232,7 +3276,6 @@ Return Value:
 
 {
 
-    ULONG BytesAvailable;
     ULONG HeaderSize;
     UCHAR Magic;
     ULONG Retries;
@@ -3255,8 +3298,7 @@ Return Value:
         if (TimeoutMilliseconds != 0) {
             TimeWaited = 0;
             while (TRUE) {
-                BytesAvailable = CommReceiveBytesReady();
-                if (BytesAvailable != 0) {
+                if (CommReceiveBytesReady() != FALSE) {
                     break;
                 }
 
@@ -3391,7 +3433,7 @@ Return Value:
     // Check to see if the target has already sent a sync to the host.
     //
 
-    while (CommReceiveBytesReady() != 0) {
+    while (CommReceiveBytesReady() != FALSE) {
         Result = DbgpKdReceiveBytes(&SynchronizeByte, sizeof(UCHAR));
         if (Result == FALSE) {
             Status = EPIPE;
@@ -3425,7 +3467,7 @@ Return Value:
 
         TimeWaited = 0;
         while (TimeWaited < 5000) {
-            if (CommReceiveBytesReady() != 0) {
+            if (CommReceiveBytesReady() != FALSE) {
                 Result = DbgpKdReceiveBytes(&SynchronizeByte, 1);
                 if (Result == FALSE) {
                     Status = EPIPE;

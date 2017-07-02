@@ -9,12 +9,12 @@
 #
 #   Binary Name:
 #
-#       Image Library
+#       Image Library (Universal)
 #
 #   Abstract:
 #
 #       This library contains the Image library used to parse executable
-#       binaries.
+#       binaries in all supported formats.
 #
 #   Author:
 #
@@ -26,13 +26,18 @@
 #
 ################################################################################
 
-BINARY = im.a
+BINARY = imu.a
 
-BINARYTYPE = library
+BINARYTYPE = klibrary
 
 include $(SRCDIR)/sources
 
-DIRS = build
+DIRS = build \
+       native
+
+ifeq ($(ARCH),x64)
+DIRS += x6432
+endif
 
 include $(SRCROOT)/os/minoca.mk
 

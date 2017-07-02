@@ -195,10 +195,11 @@ Author:
 #define FILE_OBJECT_FLAG_DIRTY_PROPERTIES 0x00000008
 
 //
-// This flag is set in the file object if its data should not be cached.
+// This flag is set in the file object if its data should not be cached in the
+// page cache.
 //
 
-#define FILE_OBJECT_FLAG_NON_CACHED 0x00000010
+#define FILE_OBJECT_FLAG_NO_PAGE_CACHE 0x00000010
 
 //
 // This flag is set if the file object gets its I/O state from elsewhere, and
@@ -219,6 +220,13 @@ Author:
 //
 
 #define FILE_OBJECT_FLAG_HARD_FLUSH_REQUIRED 0x00000080
+
+//
+// This flag is set if the file object's I/O state needs to be allocated from
+// non-paged pool.
+//
+
+#define FILE_OBJECT_FLAG_NON_PAGED_IO_STATE 0x00000100
 
 //
 // The resource allocation work is currently assigned to the system work queue.
@@ -321,7 +329,7 @@ Author:
 
 #define IO_IS_FILE_OBJECT_CACHEABLE(_FileObject)                             \
     ((IO_IS_CACHEABLE_TYPE(_FileObject->Properties.Type) != FALSE) &&        \
-     ((_FileObject->Flags & FILE_OBJECT_FLAG_NON_CACHED) == 0))
+     ((_FileObject->Flags & FILE_OBJECT_FLAG_NO_PAGE_CACHE) == 0))
 
 //
 // ------------------------------------------------------ Data Type Definitions
@@ -390,6 +398,9 @@ Members:
         FILE_OBJECT_FLAG_* for definitions. This must be modified with atomic
         operations.
 
+    MapFlags - Stores a set of additional mapping flags that should be set
+        when mapping contents from this file object.
+
     Properties - Stores the characteristics for this file.
 
     FileLockList - Stores the head of the list of file locks held on this
@@ -416,6 +427,7 @@ struct _FILE_OBJECT {
     volatile PIMAGE_SECTION_LIST ImageSectionList;
     volatile PVOID DeviceContext;
     volatile ULONG Flags;
+    ULONG MapFlags;
     FILE_PROPERTIES Properties;
     LIST_ENTRY FileLockList;
     PKEVENT FileLockEvent;
@@ -2108,14 +2120,17 @@ IopSendLookupRequest (
     PFILE_OBJECT Directory,
     PCSTR FileName,
     ULONG FileNameSize,
-    PFILE_PROPERTIES Properties
+    PFILE_PROPERTIES Properties,
+    PULONG Flags,
+    PULONG MapFlags
     );
 
 /*++
 
 Routine Description:
 
-    This routine sends a lookup request IRP.
+    This routine sends a lookup request IRP. This routine assumes that the
+    directory's lock is held exclusively.
 
 Arguments:
 
@@ -2129,38 +2144,16 @@ Arguments:
 
     FileNameSize - Supplies the size of the file name buffer including space
         for a null terminator (which may be a null terminator or may be a
-        garbage character).
+        garbage character). Supply 0 to perform a root lookup request.
 
     Properties - Supplies a pointer where the file properties will be returned
         if the file was found.
 
-Return Value:
+    Flags - Supplies a pointer where the translated file object flags will be
+        returned. See FILE_OBJECT_FLAG_* definitions.
 
-    Status code.
-
---*/
-
-KSTATUS
-IopSendRootLookupRequest (
-    PDEVICE Device,
-    PFILE_PROPERTIES Properties,
-    PULONG Flags
-    );
-
-/*++
-
-Routine Description:
-
-    This routine sends a lookup request IRP for the device's root.
-
-Arguments:
-
-    Device - Supplies a pointer to the device to send the request to.
-
-    Properties - Supplies the file properties if the file was found.
-
-    Flags - Supplies a pointer that receives the flags returned by the root
-        lookup call. See LOOKUP_FLAG_* for definitions.
+    MapFlags - Supplies a pointer where the required map flags associated with
+        this file object will be returned. See MAP_FLAG_* definitions.
 
 Return Value:
 
@@ -2438,6 +2431,7 @@ IopCreateOrLookupFileObject (
     PFILE_PROPERTIES Properties,
     PDEVICE Device,
     ULONG Flags,
+    ULONG MapFlags,
     PFILE_OBJECT *FileObject,
     PBOOL ObjectCreated
     );
@@ -2461,6 +2455,9 @@ Arguments:
 
     Flags - Supplies a bitmask of file object flags. See FILE_OBJECT_FLAG_* for
         definitions.
+
+    MapFlags - Supplies the additional map flags associated with this file
+        object. See MAP_FLAG_* definitions.
 
     FileObject - Supplies a pointer where the file object will be returned on
         success.
@@ -3744,6 +3741,69 @@ Return Value:
 --*/
 
 KSTATUS
+IopSharedMemoryNotifyFileMapping (
+    PFILE_OBJECT FileObject,
+    BOOL Mapping
+    );
+
+/*++
+
+Routine Description:
+
+    This routine is called to notify a shared memory object that it is being
+    mapped into memory or unmapped.
+
+Arguments:
+
+    FileObject - Supplies a pointer to the file object being mapped.
+
+    Mapping - Supplies a boolean indicating if a new mapping is being created
+        (TRUE) or an old mapping is being destroyed (FALSE).
+
+Return Value:
+
+    Status code.
+
+--*/
+
+KSTATUS
+IopSharedMemoryUserControl (
+    PIO_HANDLE Handle,
+    SHARED_MEMORY_COMMAND CodeNumber,
+    BOOL FromKernelMode,
+    PVOID ContextBuffer,
+    UINTN ContextBufferSize
+    );
+
+/*++
+
+Routine Description:
+
+    This routine handles user control requests destined for a shared memory
+    object.
+
+Arguments:
+
+    Handle - Supplies the open file handle.
+
+    CodeNumber - Supplies the minor code of the request.
+
+    FromKernelMode - Supplies a boolean indicating whether or not this request
+        (and the buffer associated with it) originates from user mode (FALSE)
+        or kernel mode (TRUE).
+
+    ContextBuffer - Supplies a pointer to the context buffer allocated by the
+        caller for the request.
+
+    ContextBufferSize - Supplies the size of the supplied context buffer.
+
+Return Value:
+
+    Status code.
+
+--*/
+
+KSTATUS
 IopInitializePathSupport (
     VOID
     );
@@ -4028,11 +4088,51 @@ Return Value:
 --*/
 
 KSTATUS
+IopGetUserFilePath (
+    PPATH_POINT Entry,
+    PPATH_POINT Root,
+    PSTR UserBuffer,
+    PUINTN UserBufferSize
+    );
+
+/*++
+
+Routine Description:
+
+    This routine copies the full path of the given path entry (as seen from
+    the given root) into the given user mode buffer.
+
+Arguments:
+
+    Entry - Supplies a pointer to the path point to get the full path of.
+
+    Root - Supplies a pointer to the user's root.
+
+    UserBuffer - Supplies a pointer to the user mode buffer where the full path
+        should be returned.
+
+    UserBufferSize - Supplies a pointer that on success contains the size of
+        the user mode buffer. Returns the actual size of the file path, even if
+        the supplied buffer was too small.
+
+Return Value:
+
+    STATUS_SUCCESS on success.
+
+    STATUS_PATH_NOT_FOUND if the path entry has no path.
+
+    STATUS_ACCESS_VIOLATION if the buffer was invalid.
+
+    STATUS_BUFFER_TOO_SMALL if the buffer was too small.
+
+--*/
+
+KSTATUS
 IopGetPathFromRoot (
     PPATH_POINT Entry,
     PPATH_POINT Root,
     PSTR *Path,
-    PULONG PathSize
+    PUINTN PathSize
     );
 
 /*++
@@ -4065,7 +4165,7 @@ IopGetPathFromRootUnlocked (
     PPATH_POINT Entry,
     PPATH_POINT Root,
     PSTR *Path,
-    PULONG PathSize
+    PUINTN PathSize
     );
 
 /*++
@@ -4485,7 +4585,7 @@ Return Value:
 
 KSTATUS
 IopSendUserControlIrp (
-    PDEVICE Device,
+    PIO_HANDLE Handle,
     ULONG MinorCode,
     BOOL FromKernelMode,
     PVOID UserContext,
@@ -4496,13 +4596,12 @@ IopSendUserControlIrp (
 
 Routine Description:
 
-    This routine sends a user control request to the given device. This
-    routine must be called at low level.
+    This routine sends a user control request to the device associated with
+    the given handle. This routine must be called at low level.
 
 Arguments:
 
-    Device - Supplies a pointer to the device to send the user control
-        request to.
+    Handle - Supplies the open file handle.
 
     MinorCode - Supplies the minor code of the request.
 

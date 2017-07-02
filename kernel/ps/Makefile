@@ -29,7 +29,7 @@
 
 BINARY = ps.a
 
-BINARYTYPE = library
+BINARYTYPE = klibrary
 
 OBJS = env.o      \
        info.o     \
@@ -42,6 +42,7 @@ OBJS = env.o      \
        thread.o   \
        usrlock.o  \
        utimer.o   \
+       uts.o      \
 
 ARMV7_OBJS = armv7/psarch.o   \
 
@@ -49,7 +50,9 @@ ARMV6_OBJS = armv7/psarch.o   \
 
 X86_OBJS = x86/psarch.o   \
 
-EXTRA_SRC_DIRS = x86 armv7
+X64_OBJS = x64/psarch.o   \
+
+EXTRA_SRC_DIRS = x86 x64 armv7
 
 include $(SRCROOT)/os/minoca.mk
 

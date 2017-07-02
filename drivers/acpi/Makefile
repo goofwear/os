@@ -31,7 +31,7 @@
 
 BINARY = acpi.drv
 
-BINARYTYPE = so
+BINARYTYPE = driver
 
 BINPLACE = bin
 
@@ -49,12 +49,15 @@ OBJS = acpidrv.o    \
        oprgnos.o    \
        proc.o       \
        resdesc.o    \
+       reset.o      \
 
 ARMV7_OBJS = armv7/procarch.o   \
 
 ARMV6_OBJS = $(ARMV7_OBJS)
 
 X86_OBJS = x86/procarch.o   \
+
+X64_OBJS = $(X86_OBJS)
 
 EXTRA_SRC_DIRS = x86 armv7
 

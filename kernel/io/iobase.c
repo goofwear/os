@@ -310,7 +310,7 @@ Return Value:
         //
 
         FileObject = IoHandle->FileObject;
-        READ_INT64_SYNC(&(FileObject->Properties.FileSize), &LocalFileSize);
+        LocalFileSize = FileObject->Properties.Size;
         if (IoOffsetAlignment != NULL) {
             *IoOffsetAlignment = FileObject->Properties.BlockSize;
         }
@@ -1030,7 +1030,7 @@ Return Value:
         //
 
         case SeekCommandFromEnd:
-            READ_INT64_SYNC(&(FileObject->Properties.FileSize), &FileSize);
+            FileSize = FileObject->Properties.Size;
             LocalNewOffset = Offset + FileSize;
             break;
 
@@ -1108,7 +1108,7 @@ Return Value:
     }
 
     FileObject = Handle->FileObject;
-    READ_INT64_SYNC(&(FileObject->Properties.FileSize), &LocalFileSize);
+    LocalFileSize = FileObject->Properties.Size;
     *FileSize = LocalFileSize;
     Status = STATUS_SUCCESS;
     return Status;
@@ -1146,13 +1146,8 @@ Return Value:
     KSTATUS Status;
 
     Request.FieldsToSet = 0;
+    Request.FileProperties = FileProperties;
     Status = IoSetFileInformation(TRUE, Handle, &Request);
-    if (KSUCCESS(Status)) {
-        RtlCopyMemory(FileProperties,
-                      &(Request.FileProperties),
-                      sizeof(FILE_PROPERTIES));
-    }
-
     return Status;
 }
 
@@ -1193,12 +1188,12 @@ Return Value:
     PFILE_OBJECT FileObject;
     BOOL FileOwner;
     PFILE_PROPERTIES FileProperties;
-    ULONGLONG FileSize;
     BOOL HasChownPermission;
+    FILE_PROPERTIES LocalProperties;
     BOOL LockHeldExclusive;
     BOOL LockHeldShared;
     BOOL ModifyFileSize;
-    ULONGLONG NewFileSize;
+    IO_OFFSET NewFileSize;
     KSTATUS Status;
     BOOL StatusChanged;
     PKTHREAD Thread;
@@ -1208,7 +1203,13 @@ Return Value:
     LockHeldShared = FALSE;
     Thread = KeGetCurrentThread();
     FieldsToSet = Request->FieldsToSet;
-    FileProperties = &(Request->FileProperties);
+    if (FromKernelMode != FALSE) {
+        FileProperties = Request->FileProperties;
+
+    } else {
+        FileProperties = &LocalProperties;
+    }
+
     if (FieldsToSet == 0) {
         RtlZeroMemory(FileProperties, sizeof(FILE_PROPERTIES));
     }
@@ -1223,6 +1224,21 @@ Return Value:
 
     FileObject = Handle->PathPoint.PathEntry->FileObject;
     if (FromKernelMode == FALSE) {
+
+        //
+        // Copy the properties from the user mode buffer.
+        //
+
+        if (FieldsToSet != 0) {
+            Status = MmCopyFromUserMode(FileProperties,
+                                        Request->FileProperties,
+                                        sizeof(FILE_PROPERTIES));
+
+            if (!KSUCCESS(Status)) {
+                goto SetFileInformationEnd;
+            }
+        }
+
         FileOwner = FALSE;
         if ((FileObject->Properties.UserId ==
              Thread->Identity.EffectiveUserId) ||
@@ -1435,16 +1451,13 @@ Return Value:
             }
 
             ModifyFileSize = TRUE;
-            READ_INT64_SYNC(&(FileProperties->FileSize), &NewFileSize);
+            NewFileSize = FileProperties->Size;
         }
 
     } else {
         RtlCopyMemory(FileProperties,
                       &(FileObject->Properties),
                       sizeof(FILE_PROPERTIES));
-
-        READ_INT64_SYNC(&(FileObject->Properties.FileSize), &FileSize);
-        WRITE_INT64_SYNC(&(FileProperties->FileSize), FileSize);
     }
 
     //
@@ -1495,6 +1508,16 @@ SetFileInformationEnd:
 
     } else if (LockHeldShared != FALSE) {
         KeReleaseSharedExclusiveLockShared(FileObject->Lock);
+    }
+
+    //
+    // Copy the buffer back to user mode if this is a successful get request.
+    //
+
+    if ((KSUCCESS(Status)) && (FromKernelMode == FALSE) && (FieldsToSet == 0)) {
+        Status = MmCopyToUserMode(Request->FileProperties,
+                                  FileProperties,
+                                  sizeof(FILE_PROPERTIES));
     }
 
     return Status;
@@ -2564,7 +2587,7 @@ Return Value:
         goto ReadSymbolicLinkEnd;
     }
 
-    READ_INT64_SYNC(&(FileProperties.FileSize), &Size);
+    Size = FileProperties.Size;
     TargetBufferSize = Size;
     if (Size != TargetBufferSize) {
         Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -2668,19 +2691,12 @@ Return Value:
 
 {
 
-    PDEVICE Device;
-    PFILE_OBJECT FileObject;
     KSTATUS Status;
 
-    FileObject = Handle->FileObject;
-    switch (FileObject->Properties.Type) {
+    switch (Handle->FileObject->Properties.Type) {
     case IoObjectBlockDevice:
     case IoObjectCharacterDevice:
-        Device = FileObject->Device;
-
-        ASSERT(Device->Header.Type == ObjectDevice);
-
-        Status = IopSendUserControlIrp(Device,
+        Status = IopSendUserControlIrp(Handle,
                                        MinorCode,
                                        FromKernelMode,
                                        ContextBuffer,
@@ -2704,6 +2720,15 @@ Return Value:
                                      FromKernelMode,
                                      ContextBuffer,
                                      ContextBufferSize);
+
+        break;
+
+    case IoObjectSharedMemoryObject:
+        Status = IopSharedMemoryUserControl(Handle,
+                                            MinorCode,
+                                            FromKernelMode,
+                                            ContextBuffer,
+                                            ContextBufferSize);
 
         break;
 
@@ -2853,6 +2878,51 @@ Return Value:
 }
 
 KSTATUS
+IoNotifyFileMapping (
+    PIO_HANDLE Handle,
+    BOOL Mapping
+    )
+
+/*++
+
+Routine Description:
+
+    This routine is called to notify a file object that it is being mapped
+    into memory or unmapped.
+
+Arguments:
+
+    Handle - Supplies the handle being mapped.
+
+    Mapping - Supplies a boolean indicating if a new mapping is being created
+        (TRUE) or an old mapping is being destroyed (FALSE).
+
+Return Value:
+
+    Status code.
+
+--*/
+
+{
+
+    PFILE_OBJECT FileObject;
+    KSTATUS Status;
+
+    FileObject = Handle->FileObject;
+    switch (FileObject->Properties.Type) {
+    case IoObjectSharedMemoryObject:
+        Status = IopSharedMemoryNotifyFileMapping(FileObject, Mapping);
+        break;
+
+    default:
+        Status = STATUS_SUCCESS;
+        break;
+    }
+
+    return Status;
+}
+
+KSTATUS
 IoOpenPageFile (
     PCSTR Path,
     ULONG PathSize,
@@ -2929,7 +2999,7 @@ Return Value:
     // Open the file normally, but with the page file and non-cached flags set.
     //
 
-    Flags |= OPEN_FLAG_PAGE_FILE | OPEN_FLAG_NON_CACHED;
+    Flags |= OPEN_FLAG_PAGE_FILE | OPEN_FLAG_NO_PAGE_CACHE;
     Status = IopOpen(TRUE,
                      NULL,
                      Path,
@@ -2963,7 +3033,7 @@ Return Value:
 
     NewHandle->DeviceContext = IoHandle->DeviceContext;
     NewHandle->Device = Device;
-    READ_INT64_SYNC(&(FileObject->Properties.FileSize), &LocalFileSize);
+    LocalFileSize = FileObject->Properties.Size;
     NewHandle->Capacity = LocalFileSize;
     NewHandle->IoHandle = IoHandle;
     NewHandle->OffsetAlignment = FileObject->Properties.BlockSize;
@@ -4176,7 +4246,9 @@ IopSendLookupRequest (
     PFILE_OBJECT Directory,
     PCSTR FileName,
     ULONG FileNameSize,
-    PFILE_PROPERTIES Properties
+    PFILE_PROPERTIES Properties,
+    PULONG Flags,
+    PULONG MapFlags
     )
 
 /*++
@@ -4198,11 +4270,17 @@ Arguments:
 
     FileNameSize - Supplies the size of the file name buffer including space
         for a null terminator (which may be a null terminator or may be a
-        garbage character).
+        garbage character). Supply 0 to perform a root lookup request.
 
     Properties - Supplies a pointer where the file properties will be returned
         if the file was found.
 
+    Flags - Supplies a pointer where the translated file object flags will be
+        returned. See FILE_OBJECT_FLAG_* definitions.
+
+    MapFlags - Supplies a pointer where the required map flags associated with
+        this file object will be returned. See MAP_FLAG_* definitions.
+
 Return Value:
 
     Status code.
@@ -4214,63 +4292,43 @@ Return Value:
     SYSTEM_CONTROL_LOOKUP Request;
     KSTATUS Status;
 
-    ASSERT(KeIsSharedExclusiveLockHeldExclusive(Directory->Lock) != FALSE);
-    ASSERT(Directory->Properties.HardLinkCount != 0);
-
-    RtlZeroMemory(&Request, sizeof(SYSTEM_CONTROL_LOOKUP));
+    RtlZeroMemory(Properties, sizeof(FILE_PROPERTIES));
     Request.Root = FALSE;
-    Request.DirectoryProperties = &(Directory->Properties);
+    if (FileNameSize == 0) {
+        Request.Root = TRUE;
+
+        ASSERT(Directory == NULL);
+    }
+
+    Request.Flags = 0;
+    Request.MapFlags = 0;
+    Request.DirectoryProperties = NULL;
+    if (Directory != NULL) {
+
+        ASSERT(KeIsSharedExclusiveLockHeldExclusive(Directory->Lock) != FALSE);
+        ASSERT(Directory->Properties.HardLinkCount != 0);
+        ASSERT(FileNameSize != 0);
+
+        Request.DirectoryProperties = &(Directory->Properties);
+    }
+
     Request.FileName = FileName;
     Request.FileNameSize = FileNameSize;
+    Request.Properties = Properties;
     Status = IopSendSystemControlIrp(Device,
                                      IrpMinorSystemControlLookup,
                                      &Request);
 
-    RtlCopyMemory(Properties, &(Request.Properties), sizeof(FILE_PROPERTIES));
-    return Status;
-}
+    *Flags = 0;
+    if ((Request.Flags & LOOKUP_FLAG_NO_PAGE_CACHE) != 0) {
+        *Flags |= FILE_OBJECT_FLAG_NO_PAGE_CACHE;
+    }
 
-KSTATUS
-IopSendRootLookupRequest (
-    PDEVICE Device,
-    PFILE_PROPERTIES Properties,
-    PULONG Flags
-    )
+    if ((Request.Flags & LOOKUP_FLAG_NON_PAGED_IO_STATE) != 0) {
+        *Flags |= FILE_OBJECT_FLAG_NON_PAGED_IO_STATE;
+    }
 
-/*++
-
-Routine Description:
-
-    This routine sends a lookup request IRP for the device's root.
-
-Arguments:
-
-    Device - Supplies a pointer to the device to send the request to.
-
-    Properties - Supplies the file properties if the file was found.
-
-    Flags - Supplies a pointer that receives the flags returned by the root
-        lookup call. See LOOKUP_FLAG_* for definitions.
-
-Return Value:
-
-    Status code.
-
---*/
-
-{
-
-    SYSTEM_CONTROL_LOOKUP Request;
-    KSTATUS Status;
-
-    RtlZeroMemory(&Request, sizeof(SYSTEM_CONTROL_LOOKUP));
-    Request.Root = TRUE;
-    Status = IopSendSystemControlIrp(Device,
-                                     IrpMinorSystemControlLookup,
-                                     &Request);
-
-    RtlCopyMemory(Properties, &(Request.Properties), sizeof(FILE_PROPERTIES));
-    *Flags = Request.Flags;
+    *MapFlags = Request.MapFlags;
     return Status;
 }
 
@@ -5068,9 +5126,7 @@ Return Value:
     PagingHandle->IoHandle = IoHandle;
     PagingHandle->Device = FileObject->Device;
     PagingHandle->DeviceContext = IoHandle->DeviceContext;
-    READ_INT64_SYNC(&(FileObject->Properties.FileSize),
-                    &(PagingHandle->Capacity));
-
+    PagingHandle->Capacity = FileObject->Properties.Size;
     PagingHandle->OffsetAlignment = FileObject->Properties.BlockSize;
     PagingHandle->SizeAlignment = PagingHandle->OffsetAlignment;
     *IoOffsetAlignment = PagingHandle->OffsetAlignment;
@@ -5500,9 +5556,14 @@ Return Value:
     Parameters.TimeoutInMilliseconds = Context->TimeoutInMilliseconds;
     Parameters.IoSizeInBytes = Context->SizeInBytes;
     Parameters.IoBytesCompleted = 0;
-    Parameters.IoOffset = 0;
-    Parameters.NewIoOffset = 0;
+    Parameters.IoOffset = Context->Offset;
     Parameters.FileProperties = &(FileObject->Properties);
+    if (Context->Offset == IO_OFFSET_NONE) {
+        Parameters.IoOffset =
+                        RtlAtomicOr64((PULONGLONG)&(Handle->CurrentOffset), 0);
+    }
+
+    Parameters.NewIoOffset = Context->Offset;
     Device = FileObject->Device;
 
     ASSERT(IS_DEVICE_OR_VOLUME(Device));
@@ -5520,6 +5581,11 @@ Return Value:
 
     Status = IopSendIoIrp(Device, MinorCode, &Parameters);
     Context->BytesCompleted = Parameters.IoBytesCompleted;
+    if (Context->Offset == IO_OFFSET_NONE) {
+        RtlAtomicExchange64((PULONGLONG)&(Handle->CurrentOffset),
+                            Parameters.NewIoOffset);
+    }
+
     return Status;
 }
 

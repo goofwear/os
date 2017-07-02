@@ -26,9 +26,9 @@
 #
 ################################################################################
 
-BINARY = debug.exe
+BINARY = debug
 
-BINARYTYPE = ntconsole
+BINARYTYPE = build
 
 BUILD = yes
 
@@ -38,26 +38,22 @@ INCLUDES += $(SRCDIR)/../..;
 INCLUDES += $(SRCROOT)/os/lib/im;
 
 TARGETLIBS = $(OBJROOT)/os/lib/rtl/base/build/basertl.a      \
-             $(OBJROOT)/os/lib/rtl/rtlc/build/rtlc.a         \
-             $(OBJROOT)/os/lib/im/build/im.a                 \
+             $(OBJROOT)/os/lib/rtl/urtl/rtlc/build/rtlc.a    \
+             $(OBJROOT)/os/lib/im/build/imu.a                \
 
 DYNLIBS = -lpsapi -lws2_32 -lmswsock -ladvapi32
 
 VPATH += $(SRCDIR)/..:$(SRCDIR)/../..:
 
-ifeq ($(ARCH), x86)
-
 include $(SRCDIR)/../../sources
 
-X86_OBJS += $(COMMON_OBJS)   \
-            ntcmdln.o        \
-            ntcomm.o         \
-            ntextsup.o       \
-            ntsock.o         \
-            ntusrdbg.o       \
-            ntusrsup.o       \
-
-endif
+OBJS = $(COMMON_OBJS)   \
+       ntcmdln.o        \
+       ntcomm.o         \
+       ntextsup.o       \
+       ntsock.o         \
+       ntusrdbg.o       \
+       ntusrsup.o       \
 
 include $(SRCROOT)/os/minoca.mk
 

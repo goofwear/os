@@ -1021,8 +1021,14 @@ Members:
 
     PhyRevision - Stores the revision ID of the PHY.
 
-    ChecksumFlags - Stores the flags of currently enabled checksum offloading
-        features.
+    SupportedCapabilities - Stores the set of capabilities that this device
+        supports. See NET_LINK_CAPABILITY_* for definitions.
+
+    EnabledCapabilities - Stores the currently enabled capabilities on the
+        devices. See NET_LINK_CAPABILITY_* for definitions.
+
+    ConfigurationLock - Stores a queued lock that synchronizes changes to the
+        enabled capabilities field and their supporting hardware registers.
 
 --*/
 
@@ -1057,7 +1063,9 @@ typedef struct _E1000_DEVICE {
     E1000_PHY_TYPE PhyType;
     ULONG PhyId;
     ULONG PhyRevision;
-    ULONG ChecksumFlags;
+    ULONG SupportedCapabilities;
+    ULONG EnabledCapabilities;
+    PQUEUED_LOCK ConfigurationLock;
 } E1000_DEVICE, *PE1000_DEVICE;
 
 //

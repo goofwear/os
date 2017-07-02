@@ -236,8 +236,9 @@ Return Value:
     // 1024 to avoid the divide. It looks nearly the same as percent times 10.
     //
 
-    Vm->NextGarbageCollection = Vm->BytesAllocated *
-                           (1024 + Vm->Configuration.HeapGrowthPercent) / 1024;
+    Vm->NextGarbageCollection =
+             Vm->BytesAllocated +
+             (Vm->BytesAllocated * Vm->Configuration.HeapGrowthPercent / 1024);
 
     if (Vm->NextGarbageCollection < Vm->Configuration.MinimumHeapSize) {
         Vm->NextGarbageCollection = Vm->Configuration.MinimumHeapSize;
@@ -670,6 +671,7 @@ Return Value:
 
         CK_ASSERT(((*Object)->Class != NULL) ||
                   ((*Object)->Type == CkObjectFunction) ||
+                  ((*Object)->Type == CkObjectUpvalue) ||
                   (Vm->Class.Class == NULL) ||
                   (Vm->Class.Class->Flags == 0));
 

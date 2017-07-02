@@ -28,9 +28,13 @@
 
 BINARY = mmboot.a
 
-BINARYTYPE = library
+BINARYTYPE = klibrary
 
 OBJS = ../mdl.o          \
+
+ifeq ($(ARCH),x64)
+DIRS += x6432
+endif
 
 include $(SRCROOT)/os/minoca.mk
 

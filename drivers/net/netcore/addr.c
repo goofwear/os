@@ -132,11 +132,6 @@ NetpDeactivateSocketUnlocked (
     );
 
 VOID
-NetpDeactivateRawSocketUnlocked (
-    PNET_SOCKET Socket
-    );
-
-VOID
 NetpDetachSockets (
     PNET_LINK Link,
     PNET_LINK_ADDRESS_ENTRY LinkAddress
@@ -145,20 +140,6 @@ NetpDetachSockets (
 VOID
 NetpDetachSocket (
     PNET_SOCKET Socket
-    );
-
-VOID
-NetpDetachRawSocket (
-    PNET_SOCKET Socket
-    );
-
-KSTATUS
-NetpBindRawSocket (
-    PNET_SOCKET Socket,
-    NET_SOCKET_BINDING_TYPE BindingType,
-    PNET_LINK_LOCAL_ADDRESS LocalInformation,
-    PNETWORK_ADDRESS RemoteAddress,
-    ULONG Flags
     );
 
 KSTATUS
@@ -225,13 +206,6 @@ NetpDebugPrintNetworkAddress (
 //
 // -------------------------------------------------------------------- Globals
 //
-
-//
-// Define the list of raw sockets. These do not get put in the socket trees.
-//
-
-LIST_ENTRY NetRawSocketsList;
-PSHARED_EXCLUSIVE_LOCK NetRawSocketsLock;
 
 //
 // Define the list of available network links (things that can actually send
@@ -864,6 +838,7 @@ Return Value:
     if (RtlAreUuidsEqual(Uuid, &NetNetworkDeviceInformationUuid) != FALSE) {
         if (*DataSize < sizeof(NETWORK_DEVICE_INFORMATION)) {
             *DataSize = sizeof(NETWORK_DEVICE_INFORMATION);
+            Status = STATUS_BUFFER_TOO_SMALL;
             goto GetSetLinkDeviceInformationEnd;
         }
 
@@ -947,8 +922,8 @@ Return Value:
 NET_API
 KSTATUS
 NetFindLinkForLocalAddress (
+    PNET_NETWORK_ENTRY Network,
     PNETWORK_ADDRESS LocalAddress,
-    BOOL AnyAddress,
     PNET_LINK Link,
     PNET_LINK_LOCAL_ADDRESS LinkResult
     )
@@ -964,10 +939,10 @@ Routine Description:
 
 Arguments:
 
-    LocalAddress - Supplies a pointer to the local address to test against.
+    Network - Supplies a pointer to the network entry to which the address
+        belongs.
 
-    AnyAddress - Supplies a boolean indicating whether or not the local address
-        is the network's any address.
+    LocalAddress - Supplies a pointer to the local address to test against.
 
     Link - Supplies an optional pointer to a link that the local address must
         be from.
@@ -1013,8 +988,8 @@ Return Value:
         }
 
         Status = NetFindEntryForAddress(Link,
+                                        Network,
                                         LocalAddress,
-                                        AnyAddress,
                                         &LinkAddress);
 
     //
@@ -1036,8 +1011,8 @@ Return Value:
             }
 
             Status = NetFindEntryForAddress(CurrentLink,
+                                            Network,
                                             LocalAddress,
-                                            AnyAddress,
                                             &LinkAddress);
 
             if (KSUCCESS(Status)) {
@@ -1055,8 +1030,12 @@ Return Value:
         NetLinkAddReference(Link);
         LinkResult->Link = Link;
         LinkResult->LinkAddress = LinkAddress;
-        RtlCopyMemory(&(LinkResult->LocalAddress),
+        RtlCopyMemory(&(LinkResult->ReceiveAddress),
                       LocalAddress,
+                      sizeof(NETWORK_ADDRESS));
+
+        RtlCopyMemory(&(LinkResult->SendAddress),
+                      &(LinkAddress->Address),
                       sizeof(NETWORK_ADDRESS));
     }
 
@@ -1142,11 +1121,15 @@ Return Value:
 
         if (CurrentLinkAddressEntry->Configured != FALSE) {
             FoundAddress = CurrentLinkAddressEntry;
-            RtlCopyMemory(&(LinkResult->LocalAddress),
+            RtlCopyMemory(&(LinkResult->ReceiveAddress),
                           &(FoundAddress->Address),
                           sizeof(NETWORK_ADDRESS));
 
-            ASSERT(LinkResult->LocalAddress.Port == 0);
+            RtlCopyMemory(&(LinkResult->SendAddress),
+                          &(FoundAddress->Address),
+                          sizeof(NETWORK_ADDRESS));
+
+            ASSERT(LinkResult->SendAddress.Port == 0);
         }
 
         KeReleaseQueuedLock(CurrentLink->QueuedLock);
@@ -1620,8 +1603,8 @@ NET_API
 KSTATUS
 NetFindEntryForAddress (
     PNET_LINK Link,
+    PNET_NETWORK_ENTRY Network,
     PNETWORK_ADDRESS Address,
-    BOOL AnyAddress,
     PNET_LINK_ADDRESS_ENTRY *AddressEntry
     )
 
@@ -1636,10 +1619,10 @@ Arguments:
 
     Link - Supplies the link whose address entries should be searched.
 
-    Address - Supplies the address to search for.
+    Network - Supplies an optional pointer to the network entry to which the
+        address belongs.
 
-    AnyAddress - Supplies a boolean indicating whether or not the given address
-        is the owning network's any address.
+    Address - Supplies the address to search for.
 
     AddressEntry - Supplies a pointer where the address entry will be returned
         on success.
@@ -1654,6 +1637,7 @@ Return Value:
 
 {
 
+    NET_ADDRESS_TYPE AddressType;
     COMPARISON_RESULT ComparisonResult;
     PNET_LINK_ADDRESS_ENTRY CurrentAddress;
     PLIST_ENTRY CurrentAddressEntry;
@@ -1678,33 +1662,82 @@ Return Value:
         CurrentAddressEntry = CurrentAddressEntry->Next;
 
         //
+        // If the network is known, classify the address type using this link
+        // address entry. It is necessary to classify the address for each link
+        // address entry in case it is the subnet broadcast address.
+        //
+
+        if ((Network != NULL) &&
+            (Network->Interface.GetAddressType != NULL)) {
+
+            AddressType = Network->Interface.GetAddressType(Link,
+                                                            CurrentAddress,
+                                                            Address);
+
+            //
+            // If the address type is unknown, then it definitely cannot be
+            // satisfied by this link address entry.
+            //
+
+            if (AddressType == NetAddressUnknown) {
+                continue;
+            }
+
+        //
+        // Otherwise, assume it is a unicast address, meaning it must exactly
+        // match the link address entry's local address.
+        //
+
+        } else {
+            AddressType = NetAddressUnicast;
+        }
+
+        //
         // Only a search for an any address can match a non-configured link
         // address entry.
         //
 
-        if ((CurrentAddress->Configured == FALSE) && (AnyAddress == FALSE)) {
+        if ((CurrentAddress->Configured == FALSE) &&
+            (AddressType != NetAddressAny)) {
+
             continue;
         }
 
         //
-        // Compare the full addresses unless the any address was supplied. In
-        // that case, only the port and network need to match.
+        // The domain and port must always match.
         //
 
-        if (AnyAddress == FALSE) {
-            ComparisonResult = NetpCompareNetworkAddresses(
+        if ((CurrentAddress->Address.Domain != Address->Domain) ||
+            (CurrentAddress->Address.Port != Address->Port)) {
+
+            continue;
+        }
+
+        //
+        // The any, broadcast and multicast addresses only need the domain and
+        // port to match.
+        //
+
+        if ((AddressType == NetAddressAny) ||
+            (AddressType == NetAddressBroadcast) ||
+            (AddressType == NetAddressMulticast)) {
+
+            *AddressEntry = CurrentAddress;
+            Status = STATUS_SUCCESS;
+            break;
+        }
+
+        ASSERT(AddressType == NetAddressUnicast);
+
+        //
+        // A unicast address must match the link address entry's local address.
+        //
+
+        ComparisonResult = NetpCompareNetworkAddresses(
                                                     &(CurrentAddress->Address),
                                                     Address);
 
-            if (ComparisonResult == ComparisonResultSame) {
-                *AddressEntry = CurrentAddress;
-                Status = STATUS_SUCCESS;
-                break;
-            }
-
-        } else if ((CurrentAddress->Address.Port == Address->Port) &&
-                   (CurrentAddress->Address.Domain == Address->Domain)) {
-
+        if (ComparisonResult == ComparisonResultSame) {
             *AddressEntry = CurrentAddress;
             Status = STATUS_SUCCESS;
             break;
@@ -1784,17 +1817,9 @@ Return Value:
         return;
     }
 
-    if (Socket->KernelSocket.Type == NetSocketRaw) {
-        KeAcquireSharedExclusiveLockExclusive(NetRawSocketsLock);
-        NetpDeactivateRawSocketUnlocked(Socket);
-        KeReleaseSharedExclusiveLockExclusive(NetRawSocketsLock);
-
-    } else {
-        KeAcquireSharedExclusiveLockExclusive(Socket->Protocol->SocketLock);
-        NetpDeactivateSocketUnlocked(Socket);
-        KeReleaseSharedExclusiveLockExclusive(Socket->Protocol->SocketLock);
-    }
-
+    KeAcquireSharedExclusiveLockExclusive(Socket->Protocol->SocketLock);
+    NetpDeactivateSocketUnlocked(Socket);
+    KeReleaseSharedExclusiveLockExclusive(Socket->Protocol->SocketLock);
     return;
 }
 
@@ -1815,9 +1840,7 @@ Routine Description:
     This routine officially binds a socket to a local address, local port,
     remote address and remote port tuple by adding it to the appropriate socket
     tree. It can also re-bind a socket in the case where it has already been
-    bound to a different tree. Raw sockets are handled specially as ports do
-    not make sense for raw sockets; they are put in a list that contains all
-    raw sockets.
+    bound to a different tree.
 
 Arguments:
 
@@ -1843,23 +1866,28 @@ Return Value:
 
 {
 
+    NET_ADDRESS_TYPE AddressType;
     ULONG AttemptIndex;
     BOOL Available;
     ULONG CurrentPort;
     PRED_BLACK_TREE_NODE ExistingNode;
     PNET_SOCKET ExistingSocket;
     PNET_LINK Link;
-    PNETWORK_ADDRESS LocalAddress;
     NET_LINK_LOCAL_ADDRESS LocalInformationBuffer;
     BOOL LockHeld;
+    PNET_NETWORK_ENTRY Network;
     ULONG OldFlags;
     ULONG OriginalPort;
     PNET_PROTOCOL_ENTRY Protocol;
+    PNETWORK_ADDRESS ReceiveAddress;
     BOOL Reinsert;
     NET_SOCKET SearchSocket;
-    BOOL SkipValidation;
+    PNETWORK_ADDRESS SendAddress;
+    BOOL SkipLocalValidation;
+    BOOL SkipRemoteValidation;
     KSTATUS Status;
     PRED_BLACK_TREE Tree;
+    PNETWORK_ADDRESS ValidateAddress;
 
     ASSERT(KeGetRunLevel() == RunLevelLow);
     ASSERT((LocalInformation != NULL) || (RemoteAddress != NULL));
@@ -1868,6 +1896,7 @@ Return Value:
 
     LockHeld = FALSE;
     Protocol = Socket->Protocol;
+    Network = Socket->Network;
     Reinsert = FALSE;
 
     //
@@ -1891,27 +1920,45 @@ Return Value:
     }
 
     //
-    // Raw sockets are treated a bit differently. Handle that separately.
+    // If the socket belongs to a connection based protocol, don't allow it to
+    // be bound or connected to a multicast or broadcast address.
     //
 
-    if (Socket->KernelSocket.Type == NetSocketRaw) {
-        Status = NetpBindRawSocket(Socket,
-                                   BindingType,
-                                   LocalInformation,
-                                   RemoteAddress,
-                                   Flags);
+    if ((Protocol->Flags & NET_PROTOCOL_FLAG_CONNECTION_BASED) != 0) {
+        ValidateAddress = NULL;
+        if (BindingType == SocketFullyBound) {
+            ValidateAddress = RemoteAddress;
+            Status = STATUS_DESTINATION_UNREACHABLE;
 
-        goto BindSocketEnd;
+        } else if (BindingType == SocketLocallyBound) {
+            ValidateAddress = &(LocalInformation->ReceiveAddress);
+            Status = STATUS_INVALID_ADDRESS;
+        }
+
+        if (ValidateAddress != NULL) {
+            AddressType = Network->Interface.GetAddressType(
+                                                 LocalInformation->Link,
+                                                 LocalInformation->LinkAddress,
+                                                 ValidateAddress);
+
+            if ((AddressType == NetAddressMulticast) ||
+                (AddressType == NetAddressBroadcast)) {
+
+                goto BindSocketEnd;
+            }
+        }
     }
 
     KeAcquireSharedExclusiveLockExclusive(Protocol->SocketLock);
     LockHeld = TRUE;
 
     //
-    // A socket is not allowed to become "less bound".
+    // By default, a socket is not allowed to become less bound (dubbed the act
+    // of "unbinding").
     //
 
-    if ((Socket->BindingType != SocketBindingInvalid) &&
+    if (((Flags & NET_SOCKET_BINDING_FLAG_ALLOW_UNBIND) == 0) &&
+        (Socket->BindingType != SocketBindingInvalid) &&
         (Socket->BindingType > BindingType)) {
 
         Status = STATUS_INVALID_PARAMETER;
@@ -1919,10 +1966,12 @@ Return Value:
     }
 
     //
-    // A socket is not allowed to rebind unless it is to the fully bound state.
+    // By default, a socket is not allowed to rebind unless it is to the fully
+    // bound state.
     //
 
-    if ((Socket->BindingType != SocketFullyBound) &&
+    if (((Flags & NET_SOCKET_BINDING_FLAG_ALLOW_REBIND) == 0) &&
+        (Socket->BindingType != SocketFullyBound) &&
         (Socket->BindingType == BindingType)) {
 
         Status = STATUS_INVALID_PARAMETER;
@@ -1934,9 +1983,10 @@ Return Value:
     // if they do not match.
     //
 
-    if ((Socket->LocalAddress.Port != LocalInformation->LocalAddress.Port) &&
-        (Socket->LocalAddress.Port != 0) &&
-        (LocalInformation->LocalAddress.Port != 0)) {
+    if ((Socket->LocalReceiveAddress.Port !=
+         LocalInformation->ReceiveAddress.Port) &&
+        (Socket->LocalReceiveAddress.Port != 0) &&
+        (LocalInformation->ReceiveAddress.Port != 0)) {
 
         Status = STATUS_INVALID_PARAMETER;
         goto BindSocketEnd;
@@ -1948,8 +1998,7 @@ Return Value:
     // specifically as a link that can reach the remote address.
     //
 
-    if (((Socket->BindingType == SocketLocallyBound) ||
-         (Socket->BindingType == SocketFullyBound)) &&
+    if ((Socket->Link != NULL) &&
         (BindingType == SocketFullyBound) &&
         ((Socket->Link != LocalInformation->Link) ||
          (Socket->LinkAddress != LocalInformation->LinkAddress))) {
@@ -1959,34 +2008,37 @@ Return Value:
     }
 
     //
-    // Determine the local address and link. They're in the socket if the
-    // socket was already locally bound. Otherwise they're in the local
-    // information.
+    // Determine the local address and link. Use the ones in the socket if
+    // available and not meant to be overwritten. They should be set for
+    // sockets that are fully or locally bound, with exception for sockets
+    // locally bound to a global broadcast address.
     //
 
-    if ((Socket->BindingType == SocketLocallyBound) ||
-        (Socket->BindingType == SocketFullyBound)) {
-
-        ASSERT(Socket->Link != NULL);
-
-        Link = Socket->Link;
-        LocalAddress = &(Socket->LocalAddress);
+    if ((Flags & NET_SOCKET_BINDING_FLAG_OVERWRITE_LOCAL) != 0) {
+        Link = NULL;
 
     } else {
+        Link = Socket->Link;
+        ReceiveAddress = &(Socket->LocalReceiveAddress);
+        SendAddress = &(Socket->LocalSendAddress);
+    }
+
+    if (Link == NULL) {
 
         ASSERT(LocalInformation != NULL);
-        ASSERT(Socket->Link == NULL);
 
         Link = LocalInformation->Link;
-        LocalAddress = &(LocalInformation->LocalAddress);
+        ReceiveAddress = &(LocalInformation->ReceiveAddress);
+        SendAddress = &(LocalInformation->SendAddress);
 
         //
-        // If the socket used to be unbound, then the local address gets the
-        // unbound port.
+        // If the socket was previously bound, use the local port that was
+        // already assigned.
         //
 
-        if (Socket->BindingType == SocketUnbound) {
-            LocalAddress->Port = Socket->LocalAddress.Port;
+        if (Socket->BindingType != SocketBindingInvalid) {
+            ReceiveAddress->Port = Socket->LocalReceiveAddress.Port;
+            SendAddress->Port = Socket->LocalSendAddress.Port;
         }
     }
 
@@ -2002,13 +2054,13 @@ Return Value:
 
         case SocketLocallyBound:
             RtlDebugPrint("Net: Binding locally bound socket %x: ", Socket);
-            NetpDebugPrintNetworkAddress(Socket->Network, LocalAddress);
+            NetpDebugPrintNetworkAddress(Socket->Network, ReceiveAddress);
             RtlDebugPrint("\n");
             break;
 
         case SocketFullyBound:
             RtlDebugPrint("Net: Binding fully bound socket %x, Local ", Socket);
-            NetpDebugPrintNetworkAddress(Socket->Network, LocalAddress);
+            NetpDebugPrintNetworkAddress(Socket->Network, ReceiveAddress);
             RtlDebugPrint(", Remote ");
             NetpDebugPrintNetworkAddress(Socket->Network, RemoteAddress);
             RtlDebugPrint(".\n");
@@ -2051,12 +2103,13 @@ Return Value:
     // tree. Pass it on to the new tree or keep it for the reinsert.
     //
 
-    SkipValidation = FALSE;
+    SkipLocalValidation = FALSE;
+    SkipRemoteValidation = FALSE;
     if (Socket->BindingType != SocketBindingInvalid) {
         RtlRedBlackTreeRemove(&(Protocol->SocketTree[Socket->BindingType]),
                               &(Socket->U.TreeEntry));
 
-        SkipValidation = TRUE;
+        SkipLocalValidation = TRUE;
         Reinsert = TRUE;
 
     //
@@ -2069,9 +2122,20 @@ Return Value:
 
         ASSERT(LocalInformation != NULL);
         ASSERT(BindingType == SocketLocallyBound);
-        ASSERT(LocalInformation->LocalAddress.Port != 0);
+        ASSERT(LocalInformation->ReceiveAddress.Port != 0);
 
-        SkipValidation = TRUE;
+        SkipLocalValidation = TRUE;
+    }
+
+    //
+    // Skip both the local and remote address validation if requested.
+    //
+
+    if (((Flags & NET_SOCKET_BINDING_FLAG_SKIP_ADDRESS_VALIDATION) != 0) ||
+        ((Protocol->Flags & NET_PROTOCOL_FLAG_PORTLESS) != 0)) {
+
+        SkipLocalValidation = TRUE;
+        SkipRemoteValidation = TRUE;
     }
 
     //
@@ -2081,10 +2145,11 @@ Return Value:
     // indicated by the binding flags.
     //
 
-    if ((LocalAddress->Port == 0) &&
+    if ((ReceiveAddress->Port == 0) &&
+        ((Protocol->Flags & NET_PROTOCOL_FLAG_PORTLESS) == 0) &&
         ((Flags & NET_SOCKET_BINDING_FLAG_NO_PORT_ASSIGNMENT) == 0)) {
 
-        ASSERT(SkipValidation == FALSE);
+        ASSERT(SkipLocalValidation == FALSE);
 
         CurrentPort = HlQueryTimeCounter() % NET_EPHEMERAL_PORT_COUNT;
 
@@ -2097,18 +2162,20 @@ Return Value:
              AttemptIndex < NET_EPHEMERAL_PORT_COUNT;
              AttemptIndex += 1) {
 
-            LocalAddress->Port = CurrentPort + NET_EPHEMERAL_PORT_START;
+            ReceiveAddress->Port = CurrentPort + NET_EPHEMERAL_PORT_START;
 
             //
             // If the ephemeral port is already being used by a socket, then
             // try again.
             //
 
-            Available = NetpCheckLocalAddressAvailability(Socket, LocalAddress);
+            Available = NetpCheckLocalAddressAvailability(Socket,
+                                                          ReceiveAddress);
+
             if (Available != FALSE) {
                 if (NetGlobalDebug != FALSE) {
                     RtlDebugPrint("Net: Using ephemeral port %d.\n",
-                                  LocalAddress->Port);
+                                  ReceiveAddress->Port);
                 }
 
                 Status = STATUS_SUCCESS;
@@ -2131,6 +2198,10 @@ Return Value:
             }
         }
 
+        ASSERT(SendAddress->Port == 0);
+
+        SendAddress->Port = ReceiveAddress->Port;
+
     //
     // Do checks for the case where the port was already defined. If the socket
     // was previously in the tree, then the local address is OK. Just make sure
@@ -2140,18 +2211,22 @@ Return Value:
     //
 
     } else {
-        if (SkipValidation == FALSE) {
-            Available = NetpCheckLocalAddressAvailability(Socket, LocalAddress);
+        if (SkipLocalValidation == FALSE) {
+            Available = NetpCheckLocalAddressAvailability(Socket,
+                                                          ReceiveAddress);
+
             if (Available == FALSE) {
                 Status = STATUS_ADDRESS_IN_USE;
                 goto BindSocketEnd;
             }
         }
 
-        if (BindingType == SocketFullyBound) {
+        if ((SkipRemoteValidation == FALSE) &&
+            (BindingType == SocketFullyBound)) {
+
             SearchSocket.Protocol = Socket->Protocol;
-            RtlCopyMemory(&(SearchSocket.LocalAddress),
-                          LocalAddress,
+            RtlCopyMemory(&(SearchSocket.LocalReceiveAddress),
+                          ReceiveAddress,
                           sizeof(NETWORK_ADDRESS));
 
             RtlCopyMemory(&(SearchSocket.RemoteAddress),
@@ -2199,14 +2274,26 @@ Return Value:
     }
 
     //
-    // Set the local information in the socket if it isn't already locally
-    // bound.
+    // If the current local information is to be overwritten, then zero it out.
     //
 
-    if ((Socket->BindingType != SocketLocallyBound) &&
-        (Socket->BindingType != SocketFullyBound)) {
+    if (((Flags & NET_SOCKET_BINDING_FLAG_OVERWRITE_LOCAL) != 0) &&
+        (Socket->Link != NULL)) {
 
-        ASSERT(Socket->Link == NULL);
+        NetLinkReleaseReference(Socket->Link);
+        Socket->Link = NULL;
+        Socket->LinkAddress = NULL;
+        RtlCopyMemory(&(Socket->PacketSizeInformation),
+                      &(Socket->UnboundPacketSizeInformation),
+                      sizeof(NET_PACKET_SIZE_INFORMATION));
+    }
+
+    //
+    // Set the local information in the socket if it isn't already set.
+    //
+
+    if (Socket->Link == NULL) {
+
         ASSERT(LocalInformation != NULL);
 
         if (LocalInformation->Link != NULL) {
@@ -2227,8 +2314,27 @@ Return Value:
                                          &(Socket->PacketSizeInformation));
         }
 
-        RtlCopyMemory(&(Socket->LocalAddress),
-                      LocalAddress,
+        //
+        // The receive address can only be updated if the socket is less than
+        // locally bound or local overwrites are allowed. This is necessary to
+        // prevent a socket locally bound to a broadcast or multicast address
+        // from having that broadcast/multicast address being overwritten when
+        // it connects to a remote address. The send address, however, should
+        // be updated, as that is specific to the link that can reach the
+        // remote address.
+        //
+
+        if ((Socket->BindingType < SocketLocallyBound) ||
+            (Socket->BindingType == SocketBindingInvalid) ||
+            ((Flags & NET_SOCKET_BINDING_FLAG_OVERWRITE_LOCAL) != 0)) {
+
+            RtlCopyMemory(&(Socket->LocalReceiveAddress),
+                          ReceiveAddress,
+                          sizeof(NETWORK_ADDRESS));
+        }
+
+        RtlCopyMemory(&(Socket->LocalSendAddress),
+                      SendAddress,
                       sizeof(NETWORK_ADDRESS));
     }
 
@@ -2327,93 +2433,55 @@ Return Value:
         return STATUS_INVALID_PARAMETER;
     }
 
-    //
-    // Handle raw sockets separately.
-    //
-
     Protocol = Socket->Protocol;
-    if (Socket->KernelSocket.Type == NetSocketRaw) {
-        KeAcquireSharedExclusiveLockExclusive(NetRawSocketsLock);
-        if (Socket->BindingType != SocketFullyBound) {
-            Status = STATUS_INVALID_PARAMETER;
-            goto DisconnectSocketEnd;
-        }
-
-        //
-        // The disconnect just wipes out the remote address. The socket may
-        // have been implicitly bound on the connect. So be it. It stays
-        // locally bound.
-        //
-
-        RtlZeroMemory(&(Socket->RemoteAddress), sizeof(NETWORK_ADDRESS));
-
-        //
-        // If the socket was previously inactive before becoming fully bound,
-        // return it to the inactivate state.
-        //
-
-        if ((Socket->Flags & NET_SOCKET_FLAG_PREVIOUSLY_ACTIVE) == 0) {
-            RtlAtomicAnd32(&(Socket->Flags), ~NET_SOCKET_FLAG_ACTIVE);
-        }
-
-        Socket->BindingType = SocketLocallyBound;
-
-    } else {
-        KeAcquireSharedExclusiveLockExclusive(Protocol->SocketLock);
-        if (Socket->BindingType != SocketFullyBound) {
-            Status = STATUS_INVALID_PARAMETER;
-            goto DisconnectSocketEnd;
-        }
-
-        //
-        // The disconnect just wipes out the remote address. The socket may
-        // have been implicitly bound on the connect. So be it. It stays
-        // locally bound.
-        //
-
-        RtlZeroMemory(&(Socket->RemoteAddress), sizeof(NETWORK_ADDRESS));
-
-        //
-        // If the socket was previously inactive before becoming fully bound,
-        // return it to the inactive state and clear it from the last found
-        // cache of one.
-        //
-
-        if ((Socket->Flags & NET_SOCKET_FLAG_PREVIOUSLY_ACTIVE) == 0) {
-            RtlAtomicAnd32(&(Socket->Flags), ~NET_SOCKET_FLAG_ACTIVE);
-            if (Socket == Protocol->LastSocket) {
-                Protocol->LastSocket = NULL;
-            }
-        }
-
-        //
-        // Remove the socket from the fully bound tree and put it in the
-        // locally bound tree. As the socket remains in the tree, the reference
-        // on the link does not need to be updated.
-        //
-
-        RtlRedBlackTreeRemove(&(Protocol->SocketTree[SocketFullyBound]),
-                              &(Socket->U.TreeEntry));
-
-        RtlRedBlackTreeInsert(&(Protocol->SocketTree[SocketLocallyBound]),
-                              &(Socket->U.TreeEntry));
-
-        Socket->BindingType = SocketLocallyBound;
+    KeAcquireSharedExclusiveLockExclusive(Protocol->SocketLock);
+    if (Socket->BindingType != SocketFullyBound) {
+        Status = STATUS_INVALID_PARAMETER;
+        goto DisconnectSocketEnd;
     }
+
+    //
+    // The disconnect just wipes out the remote address. The socket may
+    // have been implicitly bound on the connect. So be it. It stays
+    // locally bound.
+    //
+
+    RtlZeroMemory(&(Socket->RemoteAddress), sizeof(NETWORK_ADDRESS));
+
+    //
+    // If the socket was previously inactive before becoming fully bound,
+    // return it to the inactive state and clear it from the last found
+    // cache of one.
+    //
+
+    if ((Socket->Flags & NET_SOCKET_FLAG_PREVIOUSLY_ACTIVE) == 0) {
+        RtlAtomicAnd32(&(Socket->Flags), ~NET_SOCKET_FLAG_ACTIVE);
+        if (Socket == Protocol->LastSocket) {
+            Protocol->LastSocket = NULL;
+        }
+    }
+
+    //
+    // Remove the socket from the fully bound tree and put it in the
+    // locally bound tree. As the socket remains in the tree, the reference
+    // on the link does not need to be updated.
+    //
+
+    RtlRedBlackTreeRemove(&(Protocol->SocketTree[SocketFullyBound]),
+                          &(Socket->U.TreeEntry));
+
+    RtlRedBlackTreeInsert(&(Protocol->SocketTree[SocketLocallyBound]),
+                          &(Socket->U.TreeEntry));
+
+    Socket->BindingType = SocketLocallyBound;
 
 DisconnectSocketEnd:
-    if (Socket->KernelSocket.Type == NetSocketRaw) {
-        KeReleaseSharedExclusiveLockExclusive(NetRawSocketsLock);
-
-    } else {
-        KeReleaseSharedExclusiveLockExclusive(Protocol->SocketLock);
-    }
-
+    KeReleaseSharedExclusiveLockExclusive(Protocol->SocketLock);
     return Status;
 }
 
 NET_API
-KSTATUS
+VOID
 NetInitializeSocketLinkOverride (
     PNET_SOCKET Socket,
     PNET_LINK_LOCAL_ADDRESS LinkInformation,
@@ -2425,8 +2493,7 @@ NetInitializeSocketLinkOverride (
 Routine Description:
 
     This routine initializes the given socket link override structure with the
-    appropriate mix of socket and link information. The routine will fail if it
-    determines that the socket is already bound to a link.
+    appropriate mix of socket and link information.
 
 Arguments:
 
@@ -2439,22 +2506,16 @@ Arguments:
 
 Return Value:
 
-    STATUS_SUCCESS if the link override was successfully filled in.
-
-    STATUS_CONNECTION_EXISTS if the socket is already bound to a link.
+    None.
 
 --*/
 
 {
 
-    if (Socket->Link != NULL) {
-        return STATUS_CONNECTION_EXISTS;
-    }
-
     //
-    // The socket is not yet associated with a link. Since the unbound header
-    // size, footer size, and max packet size are saved in the socket, there is
-    // no need to protect this under a socket lock.
+    // Since the unbound header size, footer size, and max packet size are
+    // saved in the socket, there is no need to protect this under a socket
+    // lock.
     //
 
     NetpGetPacketSizeInformation(LinkInformation->Link,
@@ -2466,76 +2527,138 @@ Return Value:
                   sizeof(NET_LINK_LOCAL_ADDRESS));
 
     NetLinkAddReference(LinkOverride->LinkInformation.Link);
-    return STATUS_SUCCESS;
+    return;
 }
 
 NET_API
-PNET_SOCKET
+KSTATUS
 NetFindSocket (
-    PNET_PROTOCOL_ENTRY ProtocolEntry,
-    PNETWORK_ADDRESS LocalAddress,
-    PNETWORK_ADDRESS RemoteAddress
+    PNET_RECEIVE_CONTEXT ReceiveContext,
+    PNET_SOCKET *Socket
     )
 
 /*++
 
 Routine Description:
 
-    This routine attempts to find an active socket that matches the given
-    parameters. If the socket is found and returned, the reference count will
-    be increased on it. It is the caller's responsiblity to release that
-    reference.
+    This routine attempts to find a socket on the receiving end of the given
+    context based on matching the addresses and protocol. If the socket is
+    found and returned, the reference count will be increased on it. It is the
+    caller's responsiblity to release that reference. If this routine returns
+    that more processing is required, then subsequent calls should pass the
+    previously found socket back to the routine and the search will pick up
+    where it left off.
 
 Arguments:
 
-    ProtocolEntry - Supplies the protocol the socket must be on.
+    ReceiveContext - Supplies a pointer to the receive context used to find
+        the socket. This contains the remote address, local address, protocol,
+        and network to match on.
 
-    LocalAddress - Supplies a pointer to the local address of the socket.
-
-    RemoteAddress - Supplies a pointer to the remote address of the socket.
+    Socket - Supplies a pointer that receives a pointer to the found socket on
+        output. On input, it can optionally contain a pointer to the socket
+        from which the search for a new socket should start.
 
 Return Value:
 
-    Returns a pointer to a socket matching the given parameters, with an
-    increased reference count.
+    STATUS_SUCCESS if a socket was found.
 
-    NULL if no socket matches.
+    STATUS_MORE_PROCESSING_REQUIRED if a socket was found, but more sockets
+    may match the given address tuple.
+
+    Error status code otherwise.
 
 --*/
 
 {
 
+    NET_ADDRESS_TYPE AddressType;
+    NET_SOCKET_BINDING_TYPE BindingType;
+    BOOL FindAll;
     PRED_BLACK_TREE_NODE FoundNode;
     PNET_SOCKET FoundSocket;
     PNET_SOCKET LastSocket;
+    PNETWORK_ADDRESS LocalAddress;
+    PNET_NETWORK_ENTRY Network;
+    PRED_BLACK_TREE_NODE NextNode;
+    PNET_SOCKET NextSocket;
+    PRED_BLACK_TREE_NODE PreviousNode;
+    PNET_SOCKET PreviousSocket;
+    PNET_PROTOCOL_ENTRY Protocol;
+    PNETWORK_ADDRESS RemoteAddress;
     COMPARISON_RESULT Result;
     NET_SOCKET SearchEntry;
+    KSTATUS Status;
     PRED_BLACK_TREE Tree;
 
     ASSERT(KeGetRunLevel() == RunLevelLow);
 
     FoundSocket = NULL;
+    LocalAddress = ReceiveContext->Destination;
+    RemoteAddress = ReceiveContext->Source;
+    Network = ReceiveContext->Network;
+    Protocol = ReceiveContext->Protocol;
+    PreviousSocket = *Socket;
+    *Socket = NULL;
+
+    //
+    // Go get all the sockets if the protocol is always supposed to do that.
+    //
+
+    FindAll = FALSE;
+    if ((Protocol->Flags & NET_PROTOCOL_FLAG_FIND_ALL_SOCKETS) != 0) {
+        FindAll = TRUE;
+
+    //
+    // If broadcast and multicast addresses are allowed for this protocol
+    // (the default), then test to see if the destination address is a
+    // broadcast or multicast address. This test is not necessary if a previous
+    // socket is supplied; assume that a previous invocation determined that
+    // all sockets needed to be found for this address tuple.
+    //
+
+    } else if ((Protocol->Flags & NET_PROTOCOL_FLAG_UNICAST_ONLY) == 0) {
+        if (PreviousSocket != NULL) {
+            FindAll = TRUE;
+
+        } else if (Network->Interface.GetAddressType != NULL) {
+            AddressType = Network->Interface.GetAddressType(
+                                                          ReceiveContext->Link,
+                                                          NULL,
+                                                          LocalAddress);
+
+            if ((AddressType == NetAddressBroadcast) ||
+                (AddressType == NetAddressMulticast)) {
+
+                FindAll = TRUE;
+            }
+        }
+    }
 
     //
     // Check to see if the given remote and local addresses match the last
     // fully bound socket found. This speeds up the search process when there
-    // isn't a whole lot of activity.
+    // isn't a whole lot of activity. This cannot be done if multiple sockets
+    // need to be found as it would start the search iteration in the wrong
+    // location.
     //
 
-    KeAcquireSharedExclusiveLockShared(ProtocolEntry->SocketLock);
-    LastSocket = ProtocolEntry->LastSocket;
-    if (LastSocket != NULL) {
+    KeAcquireSharedExclusiveLockShared(Protocol->SocketLock);
+    if (FindAll == FALSE) {
+        LastSocket = Protocol->LastSocket;
+        if (LastSocket != NULL) {
 
-        ASSERT(LastSocket->BindingType == SocketFullyBound);
+            ASSERT(LastSocket->BindingType == SocketFullyBound);
 
-        Result = NetpMatchFullyBoundSocket(LastSocket,
-                                           LocalAddress,
-                                           RemoteAddress);
+            Result = NetpMatchFullyBoundSocket(LastSocket,
+                                               LocalAddress,
+                                               RemoteAddress);
 
-        if (Result == ComparisonResultSame) {
-            FoundNode = NULL;
-            FoundSocket = LastSocket;
-            goto FindSocketEnd;
+            if (Result == ComparisonResultSame) {
+                FoundNode = NULL;
+                FoundSocket = LastSocket;
+                goto FindSocketEnd;
+            }
         }
     }
 
@@ -2543,7 +2666,7 @@ Return Value:
     // Fill out a fake socket entry for search purposes.
     //
 
-    RtlCopyMemory(&(SearchEntry.LocalAddress),
+    RtlCopyMemory(&(SearchEntry.LocalReceiveAddress),
                   LocalAddress,
                   sizeof(NETWORK_ADDRESS));
 
@@ -2552,27 +2675,169 @@ Return Value:
                   sizeof(NETWORK_ADDRESS));
 
     //
-    // Loop through each tree looking for a match, starting with the most
-    // specified parameters (local and remote address), and working towards the
-    // most generic parameters (local port only).
+    // If only one socket needs to be found check each binding tree looking
+    // for a match, starting with the most specified parameters (local and
+    // remote address), and working towards the most generic parameters
+    // (local port only).
     //
 
-    Tree = &(ProtocolEntry->SocketTree[SocketFullyBound]);
-    FoundNode = RtlRedBlackTreeSearch(Tree, &(SearchEntry.U.TreeEntry));
-    if (FoundNode != NULL) {
-        goto FindSocketEnd;
-    }
+    if (FindAll == FALSE) {
+        Tree = &(Protocol->SocketTree[SocketFullyBound]);
+        FoundNode = RtlRedBlackTreeSearch(Tree, &(SearchEntry.U.TreeEntry));
+        if (FoundNode != NULL) {
+            goto FindSocketEnd;
+        }
 
-    Tree = &(ProtocolEntry->SocketTree[SocketLocallyBound]);
-    FoundNode = RtlRedBlackTreeSearch(Tree, &(SearchEntry.U.TreeEntry));
-    if (FoundNode != NULL) {
-        goto FindSocketEnd;
-    }
+        Tree = &(Protocol->SocketTree[SocketLocallyBound]);
+        FoundNode = RtlRedBlackTreeSearch(Tree, &(SearchEntry.U.TreeEntry));
+        if (FoundNode != NULL) {
+            goto FindSocketEnd;
+        }
 
-    Tree = &(ProtocolEntry->SocketTree[SocketUnbound]);
-    FoundNode = RtlRedBlackTreeSearch(Tree, &(SearchEntry.U.TreeEntry));
-    if (FoundNode != NULL) {
-        goto FindSocketEnd;
+        Tree = &(Protocol->SocketTree[SocketUnbound]);
+        FoundNode = RtlRedBlackTreeSearch(Tree, &(SearchEntry.U.TreeEntry));
+        if (FoundNode != NULL) {
+            goto FindSocketEnd;
+        }
+
+    //
+    // Otherwise go about finding the lowest socket in the unbound tree that
+    // matches the criteria. Return it. The caller should call again and this
+    // will pick up where it left off, iterating through that first tree. When
+    // that tree is exhausted of matches, it will move to the next tree. This
+    // could greatly benefit from a hash table. RTL is yet to include a hash
+    // table library as the problem of how to grow hash tables is yet to be
+    // investigated.
+    //
+
+    } else {
+        BindingType = SocketUnbound;
+        if (PreviousSocket != NULL) {
+            BindingType = PreviousSocket->BindingType;
+        }
+
+        FoundNode = NULL;
+        while (BindingType < SocketBindingTypeCount) {
+            Tree = &(Protocol->SocketTree[BindingType]);
+            BindingType += 1;
+
+            //
+            // Pick up where the last search left off if a previous socket was
+            // provided.
+            //
+
+            if (PreviousSocket != NULL) {
+                PreviousNode = &(PreviousSocket->U.TreeEntry);
+                while (TRUE) {
+                    NextNode = RtlRedBlackTreeGetNextNode(Tree,
+                                                          FALSE,
+                                                          PreviousNode);
+
+                    if (NextNode == NULL) {
+                        break;
+                    }
+
+                    NextSocket = RED_BLACK_TREE_VALUE(NextNode,
+                                                      NET_SOCKET,
+                                                      U.TreeEntry);
+
+                    if ((NextSocket->Flags & NET_SOCKET_FLAG_ACTIVE) == 0) {
+                        PreviousNode = NextNode;
+                        continue;
+                    }
+
+                    break;
+                }
+
+                if (NextNode != NULL) {
+                    Result = Tree->CompareFunction(Tree,
+                                                   NextNode,
+                                                   &(SearchEntry.U.TreeEntry));
+
+                    if (Result == ComparisonResultSame) {
+                        FoundNode = NextNode;
+                        goto FindSocketEnd;
+                    }
+                }
+
+                //
+                // There are no more matching sockets in this tree. Skip to the
+                // next tree.
+                //
+
+                PreviousSocket = NULL;
+                continue;
+
+            //
+            // Otherwise find the first matching, active socket in the new tree.
+            //
+
+            } else {
+                NextNode = RtlRedBlackTreeSearch(Tree,
+                                                 &(SearchEntry.U.TreeEntry));
+
+                if (NextNode == NULL) {
+                    continue;
+                }
+
+                //
+                // A match was found. Find the lowest match in the tree. When
+                // the loop exits, it will be the previous node touched.
+                //
+
+                do {
+                    PreviousNode = NextNode;
+                    NextNode = RtlRedBlackTreeGetNextNode(Tree,
+                                                          TRUE,
+                                                          PreviousNode);
+
+                    if (NextNode == NULL) {
+                        break;
+                    }
+
+                    Result = Tree->CompareFunction(Tree,
+                                                   NextNode,
+                                                   &(SearchEntry.U.TreeEntry));
+
+                } while (Result == ComparisonResultSame);
+
+                //
+                // Now move forward finding the first active socket that
+                // matches.
+                //
+
+                NextNode = PreviousNode;
+                do {
+                    NextSocket = RED_BLACK_TREE_VALUE(NextNode,
+                                                      NET_SOCKET,
+                                                      U.TreeEntry);
+
+                    if ((NextSocket->Flags & NET_SOCKET_FLAG_ACTIVE) != 0) {
+                        FoundNode = NextNode;
+                        goto FindSocketEnd;
+                    }
+
+                    NextNode = RtlRedBlackTreeGetNextNode(Tree,
+                                                          FALSE,
+                                                          NextNode);
+
+                    if (NextNode == NULL) {
+                        break;
+                    }
+
+                    Result = Tree->CompareFunction(Tree,
+                                                   NextNode,
+                                                   &(SearchEntry.U.TreeEntry));
+
+                } while (Result == ComparisonResultSame);
+
+                //
+                // If no active sockets were found, move to the next tree.
+                //
+
+                continue;
+            }
+        }
     }
 
 FindSocketEnd:
@@ -2580,6 +2845,7 @@ FindSocketEnd:
         FoundSocket = RED_BLACK_TREE_VALUE(FoundNode, NET_SOCKET, U.TreeEntry);
     }
 
+    Status = STATUS_NOT_FOUND;
     if (FoundSocket != NULL) {
 
         //
@@ -2590,7 +2856,7 @@ FindSocketEnd:
 
         if ((FoundSocket->Flags & NET_SOCKET_FLAG_ACTIVE) == 0) {
 
-            ASSERT(FoundSocket != ProtocolEntry->LastSocket);
+            ASSERT(FoundSocket != Protocol->LastSocket);
 
             FoundSocket = NULL;
 
@@ -2601,14 +2867,22 @@ FindSocketEnd:
 
         } else {
             IoSocketAddReference(&(FoundSocket->KernelSocket));
-            if (FoundSocket->BindingType == SocketFullyBound) {
-                ProtocolEntry->LastSocket = FoundSocket;
+            if (FindAll != FALSE) {
+                Status = STATUS_MORE_PROCESSING_REQUIRED;
+
+            } else {
+                if (FoundSocket->BindingType == SocketFullyBound) {
+                    Protocol->LastSocket = FoundSocket;
+                }
+
+                Status = STATUS_SUCCESS;
             }
         }
     }
 
-    KeReleaseSharedExclusiveLockShared(ProtocolEntry->SocketLock);
-    return FoundSocket;
+    KeReleaseSharedExclusiveLockShared(Protocol->SocketLock);
+    *Socket = FoundSocket;
+    return Status;
 }
 
 NET_API
@@ -2926,175 +3200,6 @@ GetSetNetworkDeviceInformationEnd:
 }
 
 NET_API
-VOID
-NetRawSocketsProcessReceivedData (
-    PNET_LINK Link,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress,
-    ULONG NetworkProtocol
-    )
-
-/*++
-
-Routine Description:
-
-    This routine processes a received packet and sends it to any raw sockets
-    that should be receiving it based on the protocol, source address, and
-    destination address.
-
-Arguments:
-
-    Link - Supplies a pointer to the link that received the packet.
-
-    Packet - Supplies a pointer to the network packet. It is only guaranteed to
-        include network layer headers, not physical layer headers.
-
-    SourceAddress - Supplies a pointer to the source (remote) address of the
-        packet.
-
-    DestinationAddress - Supplies a pointer to the destination (local) address
-        of the packet.
-
-    NetworkProtocol - Supplies the network protocol of the packet.
-
-Return Value:
-
-    None.
-
---*/
-
-{
-
-    PLIST_ENTRY CurrentEntry;
-    BOOL Match;
-    ULONG PartIndex;
-    PNET_PROTOCOL_ENTRY RawProtocol;
-    PNET_SOCKET Socket;
-
-    ASSERT(SourceAddress->Port == 0);
-    ASSERT(DestinationAddress->Port == 0);
-    ASSERT(SourceAddress->Domain == DestinationAddress->Domain);
-
-    //
-    // Exit immediately if the raw socket list is empty.
-    //
-
-    if (LIST_EMPTY(&NetRawSocketsList) != FALSE) {
-        return;
-    }
-
-    //
-    // Lookup the protocol used for raw sockets.
-    //
-
-    RawProtocol = NetGetProtocolEntry(SOCKET_INTERNET_PROTOCOL_RAW);
-    if (RawProtocol == NULL) {
-        return;
-    }
-
-    //
-    // Iterate over the raw sockets list. If any socket should be receiving the
-    // packet, allow it to process the data.
-    //
-
-    KeAcquireSharedExclusiveLockShared(NetRawSocketsLock);
-    CurrentEntry = NetRawSocketsList.Next;
-    while (CurrentEntry != &NetRawSocketsList) {
-        Socket = LIST_VALUE(CurrentEntry, NET_SOCKET, U.ListEntry);
-        CurrentEntry = CurrentEntry->Next;
-
-        ASSERT(Socket->Protocol == RawProtocol);
-
-        //
-        // The networks must match, first and foremost. Otherwise the protocol
-        // might not make sense.
-        //
-
-        if (Socket->KernelSocket.Domain != DestinationAddress->Domain) {
-            continue;
-        }
-
-        //
-        // The protocol must match. There are no wildcard protocols to receive
-        // all packets.
-        //
-
-        if (Socket->KernelSocket.Protocol != NetworkProtocol) {
-            continue;
-        }
-
-        //
-        // If the socket is locally bound, then the local address must match
-        // the destination address.
-        //
-
-        if ((Socket->BindingType == SocketLocallyBound) ||
-            (Socket->BindingType == SocketFullyBound)) {
-
-            ASSERT(Socket->LocalAddress.Port == 0);
-
-            Match = TRUE;
-            for (PartIndex = 0;
-                 PartIndex < MAX_NETWORK_ADDRESS_SIZE / sizeof(UINTN);
-                 PartIndex += 1) {
-
-                if (Socket->LocalAddress.Address[PartIndex] !=
-                    DestinationAddress->Address[PartIndex]) {
-
-                    Match = FALSE;
-                    break;
-                }
-            }
-
-            if (Match == FALSE) {
-                continue;
-            }
-        }
-
-        //
-        // If the socket is fully bound, then the remote address must match the
-        // source address.
-        //
-
-        if (Socket->BindingType == SocketFullyBound) {
-
-            ASSERT(Socket->RemoteAddress.Port == 0);
-
-            Match = TRUE;
-            for (PartIndex = 0;
-                 PartIndex < MAX_NETWORK_ADDRESS_SIZE / sizeof(UINTN);
-                 PartIndex += 1) {
-
-                if (Socket->RemoteAddress.Address[PartIndex] !=
-                    SourceAddress->Address[PartIndex]) {
-
-                    Match = FALSE;
-                    break;
-                }
-            }
-
-            if (Match == FALSE) {
-                continue;
-            }
-        }
-
-        //
-        // This raw socket is lucky. It gets to look at the packet.
-        //
-
-        RawProtocol->Interface.ProcessReceivedSocketData(Link,
-                                                         Socket,
-                                                         Packet,
-                                                         SourceAddress,
-                                                         DestinationAddress);
-    }
-
-    KeReleaseSharedExclusiveLockShared(NetRawSocketsLock);
-    return;
-}
-
-NET_API
 COMPARISON_RESULT
 NetCompareNetworkAddresses (
     PNETWORK_ADDRESS FirstAddress,
@@ -3159,13 +3264,6 @@ Return Value:
         goto InitializeNetworkLayerEnd;
     }
 
-    NetRawSocketsLock = KeCreateSharedExclusiveLock();
-    if (NetRawSocketsLock == NULL) {
-        Status = STATUS_INSUFFICIENT_RESOURCES;
-        goto InitializeNetworkLayerEnd;
-    }
-
-    INITIALIZE_LIST_HEAD(&NetRawSocketsList);
     INITIALIZE_LIST_HEAD(&NetLinkList);
     Status = STATUS_SUCCESS;
 
@@ -3174,11 +3272,6 @@ InitializeNetworkLayerEnd:
         if (NetLinkListLock != NULL) {
             KeDestroySharedExclusiveLock(NetLinkListLock);
             NetLinkListLock = NULL;
-        }
-
-        if (NetRawSocketsLock != NULL) {
-            KeDestroySharedExclusiveLock(NetRawSocketsLock);
-            NetRawSocketsLock = NULL;
         }
     }
 
@@ -3319,7 +3412,7 @@ Return Value:
     FirstSocket = RED_BLACK_TREE_VALUE(FirstNode, NET_SOCKET, U.TreeEntry);
     SecondSocket = RED_BLACK_TREE_VALUE(SecondNode, NET_SOCKET, U.TreeEntry);
     Result = NetpMatchFullyBoundSocket(FirstSocket,
-                                       &(SecondSocket->LocalAddress),
+                                       &(SecondSocket->LocalReceiveAddress),
                                        &(SecondSocket->RemoteAddress));
 
     return Result;
@@ -3365,8 +3458,8 @@ Return Value:
 
     FirstSocket = RED_BLACK_TREE_VALUE(FirstNode, NET_SOCKET, U.TreeEntry);
     SecondSocket = RED_BLACK_TREE_VALUE(SecondNode, NET_SOCKET, U.TreeEntry);
-    Result = NetpCompareNetworkAddresses(&(FirstSocket->LocalAddress),
-                                         &(SecondSocket->LocalAddress));
+    Result = NetpCompareNetworkAddresses(&(FirstSocket->LocalReceiveAddress),
+                                         &(SecondSocket->LocalReceiveAddress));
 
     return Result;
 }
@@ -3417,8 +3510,8 @@ Return Value:
     // Compare the local port numbers.
     //
 
-    FirstLocalAddress = &(FirstSocket->LocalAddress);
-    SecondLocalAddress = &(SecondSocket->LocalAddress);
+    FirstLocalAddress = &(FirstSocket->LocalReceiveAddress);
+    SecondLocalAddress = &(SecondSocket->LocalReceiveAddress);
     if (FirstLocalAddress->Port < SecondLocalAddress->Port) {
         return ComparisonResultAscending;
 
@@ -3582,66 +3675,6 @@ Return Value:
 }
 
 VOID
-NetpDeactivateRawSocketUnlocked (
-    PNET_SOCKET Socket
-    )
-
-/*++
-
-Routine Description:
-
-    This routine deactivates and unbinds a raw socket, preventing the socket
-    from receiving incoming packets. It assumes that the raw socket lock is
-    already held. It does not, however, disassociate a socket from its local or
-    remote address. Those are still valid properties of the socket, while its
-    on its way out.
-
-Arguments:
-
-    Socket - Supplies a pointer to the initialized raw socket to remove from
-        the raw socket list.
-
-Return Value:
-
-    None.
-
---*/
-
-{
-
-    ASSERT(KeIsSharedExclusiveLockHeldExclusive(NetRawSocketsLock) != FALSE);
-    ASSERT(Socket->KernelSocket.Type == NetSocketRaw);
-
-    if (((Socket->Flags & NET_SOCKET_FLAG_ACTIVE) == 0) &&
-        (Socket->BindingType == SocketBindingInvalid)) {
-
-        return;
-    }
-
-    RtlAtomicAnd32(&(Socket->Flags), ~NET_SOCKET_FLAG_ACTIVE);
-    if (NetGlobalDebug != FALSE) {
-        RtlDebugPrint("Net: Deactivating raw socket %x\n", Socket);
-    }
-
-    //
-    // Remove this old friend from the list.
-    //
-
-    LIST_REMOVE(&(Socket->U.ListEntry));
-    Socket->BindingType = SocketBindingInvalid;
-
-    //
-    // Release that reference that was added when the socket was added to the
-    // tree. This should not be the last reference on the kernel socket.
-    //
-
-    ASSERT(Socket->KernelSocket.ReferenceCount > 1);
-
-    IoSocketReleaseReference(&(Socket->KernelSocket));
-    return;
-}
-
-VOID
 NetpDetachSockets (
     PNET_LINK Link,
     PNET_LINK_ADDRESS_ENTRY LinkAddress
@@ -3726,26 +3759,6 @@ Return Value:
     }
 
     KeReleaseSharedExclusiveLockShared(NetPluginListLock);
-
-    //
-    // Detach all the raw sockets that were using this link.
-    //
-
-    KeAcquireSharedExclusiveLockExclusive(NetRawSocketsLock);
-    CurrentEntry = NetRawSocketsList.Next;
-    while (CurrentEntry != &NetRawSocketsList) {
-        Socket = LIST_VALUE(CurrentEntry, NET_SOCKET, U.ListEntry);
-        CurrentEntry = CurrentEntry->Next;
-        if ((Socket->Link != Link) ||
-            ((LinkAddress != NULL) && (Socket->LinkAddress != LinkAddress))) {
-
-            continue;
-        }
-
-        NetpDetachRawSocket(Socket);
-    }
-
-    KeReleaseSharedExclusiveLockExclusive(NetRawSocketsLock);
     return;
 }
 
@@ -3787,261 +3800,6 @@ Return Value:
                        TRUE);
 
     return;
-}
-
-VOID
-NetpDetachRawSocket (
-    PNET_SOCKET Socket
-    )
-
-/*++
-
-Routine Description:
-
-    This routine detaches a raw socket from all activity as a result of its
-    link going down. It assumes the raw socket lock is held.
-
-Arguments:
-
-    Socket - Supplies a pointer to the network socket that is to be unbound
-        from its link.
-
-Return Value:
-
-    None.
-
---*/
-
-{
-
-    ASSERT((Socket->Link->LinkUp == FALSE) ||
-           (Socket->LinkAddress->Configured == FALSE));
-
-    ASSERT((Socket->BindingType == SocketLocallyBound) ||
-           (Socket->BindingType == SocketFullyBound));
-
-    NetpDeactivateRawSocketUnlocked(Socket);
-    NET_SOCKET_SET_LAST_ERROR(Socket, STATUS_NO_NETWORK_CONNECTION);
-    IoSetIoObjectState(Socket->KernelSocket.IoState,
-                       POLL_EVENT_DISCONNECTED,
-                       TRUE);
-
-    return;
-}
-
-KSTATUS
-NetpBindRawSocket (
-    PNET_SOCKET Socket,
-    NET_SOCKET_BINDING_TYPE BindingType,
-    PNET_LINK_LOCAL_ADDRESS LocalInformation,
-    PNETWORK_ADDRESS RemoteAddress,
-    ULONG Flags
-    )
-
-/*++
-
-Routine Description:
-
-    This routine officially binds a raw socket to a local address and/or remote
-    address. It can also re-bind a socket in the case where it has already been
-    bound to a different address.
-
-Arguments:
-
-    Socket - Supplies a pointer to the initialized socket to bind.
-
-    BindingType - Supplies the type of binding for the socket.
-
-    LocalInformation - Supplies a pointer to the information for the local link
-        or address to which the socket shall be bound. Use this for unbound
-        sockets, leaving the link and link address NULL.
-
-    RemoteAddress - Supplies an optional pointer to a remote address to use
-        when fully binding the socket.
-
-    Flags - Supplies a bitmask of binding flags. See NET_SOCKET_BINDING_FLAG_*
-        for definitions.
-
-Return Value:
-
-    Status code.
-
---*/
-
-{
-
-    ULONG OldFlags;
-    KSTATUS Status;
-
-    ASSERT(Socket->KernelSocket.Type == NetSocketRaw);
-    ASSERT(LocalInformation != NULL);
-
-    //
-    // This routine is simple. It updates the local and/or remote address for
-    // the socket.
-    //
-
-    KeAcquireSharedExclusiveLockExclusive(NetRawSocketsLock);
-
-    //
-    // If the socket is locally bound and destined to be fully bound, then the
-    // link and link address entry better match. The supplied link was chosen
-    // specifically as a link that can reach the remote address.
-    //
-
-    if (((Socket->BindingType == SocketLocallyBound) ||
-         (Socket->BindingType == SocketFullyBound)) &&
-        (BindingType == SocketFullyBound) &&
-        ((Socket->Link != LocalInformation->Link) ||
-         (Socket->LinkAddress != LocalInformation->LinkAddress))) {
-
-        Status = STATUS_INVALID_PARAMETER;
-        goto BindRawSocketEnd;
-    }
-
-    //
-    // Debug print the socket binding.
-    //
-
-    if (NetGlobalDebug != FALSE) {
-        switch (BindingType) {
-        case SocketUnbound:
-            RtlDebugPrint("Net: Binding unbound raw socket %x.\n", Socket);
-            break;
-
-        case SocketLocallyBound:
-            RtlDebugPrint("Net: Binding locally bound raw socket %x: ", Socket);
-            NetDebugPrintAddress(&(LocalInformation->LocalAddress));
-            RtlDebugPrint("\n");
-            break;
-
-        case SocketFullyBound:
-            RtlDebugPrint("Net: Binding fully bound raw socket %x, Local ",
-                          Socket);
-
-            NetDebugPrintAddress(&(LocalInformation->LocalAddress));
-            RtlDebugPrint(", Remote ");
-            NetDebugPrintAddress(RemoteAddress);
-            RtlDebugPrint(".\n");
-            break;
-
-        default:
-
-            ASSERT(FALSE);
-
-            break;
-        }
-    }
-
-    //
-    // If the socket is bound to a link and the link is down, then do not
-    // insert the socket.
-    //
-    // N.B. Because taking a link down requires iterating over the raw socket
-    //      list, this does not require any additional synchronization. The
-    //      link state is updated and then it waits on the raw socket lock. So,
-    //      either changing the link state acquired the raw socket lock first,
-    //      in which case the link state is already set to 'down' and this
-    //      should fail. Or this routine acquired the raw socket lock first and
-    //      if it notices the link is down, great. If it doesn't, then the
-    //      socket will get put in the list and the process of taking the link
-    //      down will clean it up. Of course the link could come back up after
-    //      this check, but that's OK. It's up to the caller to try again.
-    //
-
-    if ((LocalInformation->Link != NULL) &&
-        (LocalInformation->Link->LinkUp == FALSE)) {
-
-        NetpDetachRawSocket(Socket);
-        Status = STATUS_NO_NETWORK_CONNECTION;
-        goto BindRawSocketEnd;
-    }
-
-    //
-    // This socket is good to go to use the remote address.
-    //
-
-    if (RemoteAddress != NULL) {
-
-        ASSERT(BindingType == SocketFullyBound);
-
-        RtlCopyMemory(&(Socket->RemoteAddress),
-                      RemoteAddress,
-                      sizeof(NETWORK_ADDRESS));
-
-    }
-
-    //
-    // Clear out any old link information.
-    //
-
-    if (Socket->Link != NULL) {
-        NetLinkReleaseReference(Socket->Link);
-        Socket->Link = NULL;
-        Socket->LinkAddress = NULL;
-        RtlCopyMemory(&(Socket->PacketSizeInformation),
-                      &(Socket->UnboundPacketSizeInformation),
-                      sizeof(NET_PACKET_SIZE_INFORMATION));
-    }
-
-    //
-    // Set the link information in the socket.
-    //
-
-    if (LocalInformation->Link != NULL) {
-
-        ASSERT(LocalInformation->LinkAddress != NULL);
-
-        NetLinkAddReference(LocalInformation->Link);
-        Socket->Link = LocalInformation->Link;
-        Socket->LinkAddress = LocalInformation->LinkAddress;
-
-        //
-        // Now is the time to update the socket's max packet size,
-        // header size, and footer size based on the link.
-        //
-
-        NetpGetPacketSizeInformation(Socket->Link,
-                                     Socket,
-                                     &(Socket->PacketSizeInformation));
-    }
-
-    RtlCopyMemory(&(Socket->LocalAddress),
-                  &(LocalInformation->LocalAddress),
-                  sizeof(NETWORK_ADDRESS));
-
-    //
-    // Mark the socket as active if requested. If this is moving to the fully
-    // bound state from another state, record whether or not it was previously
-    // active.
-    //
-
-    if ((Flags & NET_SOCKET_BINDING_FLAG_ACTIVATE) != 0) {
-        OldFlags = RtlAtomicOr32(&(Socket->Flags), NET_SOCKET_FLAG_ACTIVE);
-        if ((BindingType == SocketFullyBound) &&
-            (Socket->BindingType != SocketFullyBound) &&
-            ((OldFlags & NET_SOCKET_FLAG_ACTIVE) != 0)) {
-
-            RtlAtomicOr32(&(Socket->Flags), NET_SOCKET_FLAG_PREVIOUSLY_ACTIVE);
-        }
-    }
-
-    //
-    // Insert the socket into the list of raw sockets, unless it's already in
-    // the list.
-    //
-
-    if (Socket->BindingType == SocketBindingInvalid) {
-        INSERT_BEFORE(&(Socket->U.ListEntry), &NetRawSocketsList);
-        IoSocketAddReference(&(Socket->KernelSocket));
-    }
-
-    Socket->BindingType = BindingType;
-    Status = STATUS_SUCCESS;
-
-BindRawSocketEnd:
-    KeReleaseSharedExclusiveLockExclusive(NetRawSocketsLock);
-    return Status;
 }
 
 KSTATUS
@@ -4161,17 +3919,17 @@ Return Value:
     // only matching local ports.
     //
 
-    if (Socket->LocalAddress.Port < LocalAddress->Port) {
+    if (Socket->LocalReceiveAddress.Port < LocalAddress->Port) {
         return ComparisonResultAscending;
 
-    } else if (Socket->LocalAddress.Port > LocalAddress->Port) {
+    } else if (Socket->LocalReceiveAddress.Port > LocalAddress->Port) {
         return ComparisonResultDescending;
     }
 
-    if (Socket->LocalAddress.Domain < LocalAddress->Domain) {
+    if (Socket->LocalReceiveAddress.Domain < LocalAddress->Domain) {
         return ComparisonResultAscending;
 
-    } else if (Socket->LocalAddress.Domain > LocalAddress->Domain) {
+    } else if (Socket->LocalReceiveAddress.Domain > LocalAddress->Domain) {
         return ComparisonResultDescending;
     }
 
@@ -4196,12 +3954,12 @@ Return Value:
          PartIndex < MAX_NETWORK_ADDRESS_SIZE / sizeof(UINTN);
          PartIndex += 1) {
 
-        if (Socket->LocalAddress.Address[PartIndex] <
+        if (Socket->LocalReceiveAddress.Address[PartIndex] <
             LocalAddress->Address[PartIndex]) {
 
             return ComparisonResultAscending;
 
-        } else if (Socket->LocalAddress.Address[PartIndex] >
+        } else if (Socket->LocalReceiveAddress.Address[PartIndex] >
                    LocalAddress->Address[PartIndex]) {
 
             return ComparisonResultDescending;
@@ -4336,7 +4094,7 @@ Return Value:
     // Create a search entry that does not have a remote address.
     //
 
-    RtlCopyMemory(&(SearchSocket.LocalAddress),
+    RtlCopyMemory(&(SearchSocket.LocalReceiveAddress),
                   LocalAddress,
                   sizeof(NETWORK_ADDRESS));
 
@@ -4365,11 +4123,11 @@ Return Value:
 
     while (FoundNode != NULL) {
         FoundSocket = RED_BLACK_TREE_VALUE(FoundNode, NET_SOCKET, U.TreeEntry);
-        if (FoundSocket->LocalAddress.Port != LocalAddress->Port) {
+        if (FoundSocket->LocalReceiveAddress.Port != LocalAddress->Port) {
             break;
         }
 
-        if (FoundSocket->LocalAddress.Domain != LocalAddress->Domain) {
+        if (FoundSocket->LocalReceiveAddress.Domain != LocalAddress->Domain) {
             break;
         }
 
@@ -4396,7 +4154,7 @@ Return Value:
                  PartIndex < MAX_NETWORK_ADDRESS_SIZE / sizeof(UINTN);
                  PartIndex += 1) {
 
-                if (FoundSocket->LocalAddress.Address[PartIndex] !=
+                if (FoundSocket->LocalReceiveAddress.Address[PartIndex] !=
                     LocalAddress->Address[PartIndex]) {
 
                     AddressesMatch = FALSE;
@@ -4476,11 +4234,13 @@ Return Value:
                                                NET_SOCKET,
                                                U.TreeEntry);
 
-            if (FoundSocket->LocalAddress.Port != LocalAddress->Port) {
+            if (FoundSocket->LocalReceiveAddress.Port != LocalAddress->Port) {
                 break;
             }
 
-            if (FoundSocket->LocalAddress.Domain != LocalAddress->Domain) {
+            if (FoundSocket->LocalReceiveAddress.Domain !=
+                LocalAddress->Domain) {
+
                 break;
             }
 
@@ -4513,7 +4273,7 @@ Return Value:
                      PartIndex < MAX_NETWORK_ADDRESS_SIZE / sizeof(UINTN);
                      PartIndex += 1) {
 
-                    if (FoundSocket->LocalAddress.Address[PartIndex] !=
+                    if (FoundSocket->LocalReceiveAddress.Address[PartIndex] !=
                         LocalAddress->Address[PartIndex]) {
 
                         AddressesMatch = FALSE;
@@ -4610,11 +4370,13 @@ Return Value:
                                                NET_SOCKET,
                                                U.TreeEntry);
 
-            if (FoundSocket->LocalAddress.Port != LocalAddress->Port) {
+            if (FoundSocket->LocalReceiveAddress.Port != LocalAddress->Port) {
                 break;
             }
 
-            if (FoundSocket->LocalAddress.Domain != LocalAddress->Domain) {
+            if (FoundSocket->LocalReceiveAddress.Domain !=
+                LocalAddress->Domain) {
+
                 break;
             }
 

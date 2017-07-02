@@ -230,7 +230,8 @@ NetpUdpCreateSocket (
     PNET_PROTOCOL_ENTRY ProtocolEntry,
     PNET_NETWORK_ENTRY NetworkEntry,
     ULONG NetworkProtocol,
-    PNET_SOCKET *NewSocket
+    PNET_SOCKET *NewSocket,
+    ULONG Phase
     );
 
 VOID
@@ -284,20 +285,13 @@ NetpUdpSend (
 
 VOID
 NetpUdpProcessReceivedData (
-    PNET_LINK Link,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress,
-    PNET_PROTOCOL_ENTRY ProtocolEntry
+    PNET_RECEIVE_CONTEXT ReceiveContext
     );
 
 KSTATUS
 NetpUdpProcessReceivedSocketData (
-    PNET_LINK Link,
     PNET_SOCKET Socket,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress
+    PNET_RECEIVE_CONTEXT ReceiveContext
     );
 
 KSTATUS
@@ -335,6 +329,7 @@ NET_PROTOCOL_ENTRY NetUdpProtocol = {
     {NULL, NULL},
     NetSocketDatagram,
     SOCKET_INTERNET_PROTOCOL_UDP,
+    0,
     NULL,
     NULL,
     {{0}, {0}, {0}},
@@ -441,7 +436,8 @@ NetpUdpCreateSocket (
     PNET_PROTOCOL_ENTRY ProtocolEntry,
     PNET_NETWORK_ENTRY NetworkEntry,
     ULONG NetworkProtocol,
-    PNET_SOCKET *NewSocket
+    PNET_SOCKET *NewSocket,
+    ULONG Phase
     )
 
 /*++
@@ -466,7 +462,13 @@ Arguments:
         socket structure will be returned. The caller is responsible for
         allocating the socket (and potentially a larger structure for its own
         context). The core network library will fill in the standard socket
-        structure after this routine returns.
+        structure after this routine returns. In phase 1, this will contain
+        a pointer to the socket allocated during phase 0.
+
+    Phase - Supplies the socket creation phase. Phase 0 is the allocation phase
+        and phase 1 is the advanced initialization phase, which is invoked
+        after net core is done filling out common portions of the socket
+        structure.
 
 Return Value:
 
@@ -486,6 +488,14 @@ Return Value:
     ASSERT((ProtocolEntry->ParentProtocolNumber ==
             SOCKET_INTERNET_PROTOCOL_UDP) &&
            (NetworkProtocol == ProtocolEntry->ParentProtocolNumber));
+
+    //
+    // TCP only operates in phase 0.
+    //
+
+    if (Phase != 0) {
+        return STATUS_SUCCESS;
+    }
 
     NetSocket = NULL;
     UdpSocket = MmAllocatePagedPool(sizeof(UDP_SOCKET),
@@ -619,6 +629,10 @@ Return Value:
            UdpSocket->ReceiveBufferTotalSize);
 
     KeReleaseQueuedLock(UdpSocket->ReceiveLock);
+    if (Socket->Network->Interface.DestroySocket != NULL) {
+        Socket->Network->Interface.DestroySocket(Socket);
+    }
+
     KeDestroyQueuedLock(UdpSocket->ReceiveLock);
     MmFreePagedPool(UdpSocket);
     return;
@@ -657,7 +671,7 @@ Return Value:
 
     KSTATUS Status;
 
-    if (Socket->LocalAddress.Domain != NetDomainInvalid) {
+    if (Socket->LocalReceiveAddress.Domain != NetDomainInvalid) {
         Status = STATUS_INVALID_PARAMETER;
         goto UdpBindToAddressEnd;
     }
@@ -675,7 +689,7 @@ Return Value:
     // Pass the request down to the network layer.
     //
 
-    Status = Socket->Network->Interface.BindToAddress(Socket, Link, Address);
+    Status = Socket->Network->Interface.BindToAddress(Socket, Link, Address, 0);
     if (!KSUCCESS(Status)) {
         goto UdpBindToAddressEnd;
     }
@@ -1052,7 +1066,7 @@ Return Value:
     // The socket needs to at least be bound to a local port.
     //
 
-    ASSERT(Socket->LocalAddress.Port != 0);
+    ASSERT(Socket->LocalSendAddress.Port != 0);
 
     //
     // If the socket has no link, then try to find a link that can service the
@@ -1061,31 +1075,22 @@ Return Value:
 
     if (Socket->Link == NULL) {
         Status = NetFindLinkForRemoteAddress(Destination, &LinkInformation);
-        if (KSUCCESS(Status)) {
-
-            //
-            // The link override should use the socket's port.
-            //
-
-            LinkInformation.LocalAddress.Port = Socket->LocalAddress.Port;
-
-            //
-            // Synchronously get the correct header, footer, and max packet
-            // sizes.
-            //
-
-            Status = NetInitializeSocketLinkOverride(Socket,
-                                                     &LinkInformation,
-                                                     &LinkOverrideBuffer);
-
-            if (KSUCCESS(Status)) {
-                LinkOverride = &LinkOverrideBuffer;
-            }
-        }
-
-        if (!KSUCCESS(Status) && (Status != STATUS_CONNECTION_EXISTS)) {
+        if (!KSUCCESS(Status)) {
             goto UdpSendEnd;
         }
+
+        //
+        // The link override should use the socket's port.
+        //
+
+        LinkInformation.SendAddress.Port = Socket->LocalSendAddress.Port;
+
+        //
+        // Synchronously get the correct header, footer, and max packet ssizes.
+        //
+
+        LinkOverride = &LinkOverrideBuffer;
+        NetInitializeSocketLinkOverride(Socket, &LinkInformation, LinkOverride);
     }
 
     //
@@ -1100,7 +1105,7 @@ Return Value:
         Link = LinkOverrideBuffer.LinkInformation.Link;
         HeaderSize = LinkOverrideBuffer.PacketSizeInformation.HeaderSize;
         FooterSize = LinkOverrideBuffer.PacketSizeInformation.FooterSize;
-        SourcePort = LinkOverrideBuffer.LinkInformation.LocalAddress.Port;
+        SourcePort = LinkOverrideBuffer.LinkInformation.SendAddress.Port;
 
     } else {
 
@@ -1109,7 +1114,7 @@ Return Value:
         Link = Socket->Link;
         HeaderSize = Socket->PacketSizeInformation.HeaderSize;
         FooterSize = Socket->PacketSizeInformation.FooterSize;
-        SourcePort = Socket->LocalAddress.Port;
+        SourcePort = Socket->LocalSendAddress.Port;
     }
 
     NetworkLocalPort = CPU_TO_NETWORK16(SourcePort);
@@ -1158,8 +1163,8 @@ Return Value:
     UdpHeader->DestinationPort = NetworkRemotePort;
     UdpHeader->Length = CPU_TO_NETWORK16(Size + sizeof(UDP_HEADER));
     UdpHeader->Checksum = 0;
-    if ((Link->Properties.ChecksumFlags &
-        NET_LINK_CHECKSUM_FLAG_TRANSMIT_UDP_OFFLOAD) != 0) {
+    if ((Link->Properties.Capabilities &
+        NET_LINK_CAPABILITY_TRANSMIT_UDP_CHECKSUM_OFFLOAD) != 0) {
 
         Packet->Flags |= NET_PACKET_FLAG_UDP_CHECKSUM_OFFLOAD;
     }
@@ -1203,11 +1208,7 @@ UdpSendEnd:
 
 VOID
 NetpUdpProcessReceivedData (
-    PNET_LINK Link,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress,
-    PNET_PROTOCOL_ENTRY ProtocolEntry
+    PNET_RECEIVE_CONTEXT ReceiveContext
     )
 
 /*++
@@ -1218,22 +1219,8 @@ Routine Description:
 
 Arguments:
 
-    Link - Supplies a pointer to the link that received the packet.
-
-    Packet - Supplies a pointer to a structure describing the incoming packet.
-        This structure may be used as a scratch space while this routine
-        executes and the packet travels up the stack, but will not be accessed
-        after this routine returns.
-
-    SourceAddress - Supplies a pointer to the source (remote) address that the
-        packet originated from. This memory will not be referenced once the
-        function returns, it can be stack allocated.
-
-    DestinationAddress - Supplies a pointer to the destination (local) address
-        that the packet is heading to. This memory will not be referenced once
-        the function returns, it can be stack allocated.
-
-    ProtocolEntry - Supplies a pointer to this protocol's protocol entry.
+    ReceiveContext - Supplies a pointer to the receive context that stores the
+        link, packet, network, protocol, and source and destination addresses.
 
 Return Value:
 
@@ -1246,10 +1233,14 @@ Return Value:
 
     PUDP_HEADER Header;
     USHORT Length;
+    PNET_PACKET_BUFFER Packet;
+    PNET_SOCKET PreviousSocket;
     PNET_SOCKET Socket;
+    KSTATUS Status;
 
     ASSERT(KeGetRunLevel() == RunLevelLow);
 
+    Packet = ReceiveContext->Packet;
     Header = (PUDP_HEADER)(Packet->Buffer + Packet->DataOffset);
     Length = NETWORK_TO_CPU16(Header->Length);
     if (Length > (Packet->FooterOffset - Packet->DataOffset)) {
@@ -1261,44 +1252,53 @@ Return Value:
         return;
     }
 
-    SourceAddress->Port = NETWORK_TO_CPU16(Header->SourcePort);
-    DestinationAddress->Port = NETWORK_TO_CPU16(Header->DestinationPort);
+    ReceiveContext->Source->Port = NETWORK_TO_CPU16(Header->SourcePort);
+    ReceiveContext->Destination->Port =
+                                     NETWORK_TO_CPU16(Header->DestinationPort);
 
     //
-    // Find a socket willing to take this packet.
+    // Find all the sockets willing to take this packet.
     //
 
-    Socket = NetFindSocket(ProtocolEntry, DestinationAddress, SourceAddress);
-    if (Socket == NULL) {
-        return;
+    Socket = NULL;
+    PreviousSocket = NULL;
+    do {
+        Status = NetFindSocket(ReceiveContext, &Socket);
+        if (!KSUCCESS(Status) && (Status != STATUS_MORE_PROCESSING_REQUIRED)) {
+            break;
+        }
+
+        //
+        // Pass the packet onto the socket for copying and safe keeping until
+        // the data is read.
+        //
+
+        NetpUdpProcessReceivedSocketData(Socket, ReceiveContext);
+
+        //
+        // Release the reference on the previous socket added by the find
+        // socket call.
+        //
+
+        if (PreviousSocket != NULL) {
+            IoSocketReleaseReference(&(PreviousSocket->KernelSocket));
+        }
+
+        PreviousSocket = Socket;
+
+    } while (Status == STATUS_MORE_PROCESSING_REQUIRED);
+
+    if (PreviousSocket != NULL) {
+        IoSocketReleaseReference(&(PreviousSocket->KernelSocket));
     }
 
-    //
-    // Pass the packet onto the socket for copying and safe keeping until the
-    // data is read.
-    //
-
-    NetpUdpProcessReceivedSocketData(Link,
-                                     Socket,
-                                     Packet,
-                                     SourceAddress,
-                                     DestinationAddress);
-
-    //
-    // Release the reference on the socket added by the find socket call.
-    //
-
-    IoSocketReleaseReference(&(Socket->KernelSocket));
     return;
 }
 
 KSTATUS
 NetpUdpProcessReceivedSocketData (
-    PNET_LINK Link,
     PNET_SOCKET Socket,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress
+    PNET_RECEIVE_CONTEXT ReceiveContext
     )
 
 /*++
@@ -1310,22 +1310,10 @@ Routine Description:
 
 Arguments:
 
-    Link - Supplies a pointer to the network link that received the packet.
-
     Socket - Supplies a pointer to the socket that received the packet.
 
-    Packet - Supplies a pointer to a structure describing the incoming packet.
-        Use of this structure depends on its flags. If it is a multicast
-        packet, then it cannot be modified by this routine. Otherwise it can
-        be used as scratch space and modified.
-
-    SourceAddress - Supplies a pointer to the source (remote) address that the
-        packet originated from. This memory will not be referenced once the
-        function returns, it can be stack allocated.
-
-    DestinationAddress - Supplies a pointer to the destination (local) address
-        that the packet is heading to. This memory will not be referenced once
-        the function returns, it can be stack allocated.
+    ReceiveContext - Supplies a pointer to the receive context that stores the
+        link, packet, network, protocol, and source and destination addresses.
 
 Return Value:
 
@@ -1338,6 +1326,7 @@ Return Value:
     ULONG AllocationSize;
     PUDP_HEADER Header;
     USHORT Length;
+    PNET_PACKET_BUFFER Packet;
     USHORT PayloadLength;
     KSTATUS Status;
     PUDP_RECEIVED_PACKET UdpPacket;
@@ -1346,6 +1335,7 @@ Return Value:
     ASSERT(KeGetRunLevel() == RunLevelLow);
 
     UdpSocket = (PUDP_SOCKET)Socket;
+    Packet = ReceiveContext->Packet;
     Header = (PUDP_HEADER)(Packet->Buffer + Packet->DataOffset);
     Length = NETWORK_TO_CPU16(Header->Length);
     if (Length > (Packet->FooterOffset - Packet->DataOffset)) {
@@ -1363,8 +1353,10 @@ Return Value:
     // addresses better be completely filled in.
     //
 
-    ASSERT(SourceAddress->Port == NETWORK_TO_CPU16(Header->SourcePort));
-    ASSERT(DestinationAddress->Port ==
+    ASSERT(ReceiveContext->Source->Port ==
+           NETWORK_TO_CPU16(Header->SourcePort));
+
+    ASSERT(ReceiveContext->Destination->Port ==
            NETWORK_TO_CPU16(Header->DestinationPort));
 
     //
@@ -1382,7 +1374,7 @@ Return Value:
     }
 
     RtlCopyMemory(&(UdpPacket->Address),
-                  SourceAddress,
+                  ReceiveContext->Source,
                   sizeof(NETWORK_ADDRESS));
 
     UdpPacket->DataBuffer = (PVOID)(UdpPacket + 1);

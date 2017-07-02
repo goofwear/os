@@ -2595,7 +2595,8 @@ Return Value:
 
 BOOL
 IoIoHandleIsCacheable (
-    PIO_HANDLE IoHandle
+    PIO_HANDLE IoHandle,
+    PULONG MapFlags
     )
 
 /*++
@@ -2609,9 +2610,14 @@ Arguments:
 
     IoHandle - Supplies a pointer to an I/O handle.
 
+    MapFlags - Supplies an optional pointer where any additional map flags
+        needed when mapping sections from this handle will be returned.
+        See MAP_FLAG_* definitions.
+
 Return Value:
 
-    Returns TRUE if the I/O handle's object is cached or FALSE otherwise.
+    Returns TRUE if the I/O handle's object uses the page cache, FALSE
+    otherwise.
 
 --*/
 
@@ -2929,7 +2935,8 @@ Return Value:
 
 PHYSICAL_ADDRESS
 IoGetPageCacheEntryPhysicalAddress (
-    PPAGE_CACHE_ENTRY Entry
+    PPAGE_CACHE_ENTRY Entry,
+    PULONG MapFlags
     )
 
 /*++
@@ -2941,6 +2948,9 @@ Routine Description:
 Arguments:
 
     Entry - Supplies a pointer to a page cache entry.
+
+    MapFlags - Supplies an optional pointer to the additional mapping flags
+        mandated by the underlying file object.
 
 Return Value:
 
@@ -3068,6 +3078,69 @@ Return Value:
 {
 
     return;
+}
+
+KSTATUS
+IoNotifyFileMapping (
+    PIO_HANDLE Handle,
+    BOOL Mapping
+    )
+
+/*++
+
+Routine Description:
+
+    This routine is called to notify a file object that it is being mapped
+    into memory or unmapped.
+
+Arguments:
+
+    Handle - Supplies the handle being mapped.
+
+    Mapping - Supplies a boolean indicating if a new mapping is being created
+        (TRUE) or an old mapping is being destroyed (FALSE).
+
+Return Value:
+
+    Status code.
+
+--*/
+
+{
+
+    return STATUS_SUCCESS;
+}
+
+KERNEL_API
+KSTATUS
+IoGetFileInformation (
+    PIO_HANDLE Handle,
+    PFILE_PROPERTIES FileProperties
+    )
+
+/*++
+
+Routine Description:
+
+    This routine gets the file properties for the given I/O handle.
+
+Arguments:
+
+    Handle - Supplies the open file handle.
+
+    FileProperties - Supplies a pointer where the file properties will be
+        returned on success.
+
+Return Value:
+
+    Status code.
+
+--*/
+
+{
+
+    RtlZeroMemory(FileProperties, sizeof(FILE_PROPERTIES));
+    return STATUS_SUCCESS;
 }
 
 VOID

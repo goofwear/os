@@ -34,6 +34,7 @@ Environment:
 #include <minoca/kernel/sysres.h>
 #include <minoca/lib/basevid.h>
 #include <minoca/lib/termlib.h>
+#include <minoca/video/fb.h>
 
 //
 // --------------------------------------------------------------------- Macros
@@ -353,6 +354,27 @@ Members:
     TabStops - Stores a bitfield of the current tab stops. Each bit represents
         a column, and that bit is set if the column is a tab stop.
 
+    CreationTime - Stores the time of creation of this device.
+
+    OpenHandles - Stores the number of open device handles. If any device
+        handles are open, then the terminal is not drawn.
+
+    Size - Stores the size of the frame buffer in bytes.
+
+    BaseVideoMode - Stores the base video mode.
+
+    RedMask - Stores the maxk of red bits in each pixel.
+
+    GreenMask - Stores the mask of green bits in each pixel.
+
+    BlueMask - Stores the mask of blue bits in each pixel.
+
+    PixelsPerScanLine - Stores the number of pixels in a line, including
+        any extra non-visual pixels.
+
+    BannerThreadEnabled - Stores a boolean indicating if the banner thread was
+        previously enabled or not.
+
 --*/
 
 typedef struct _VIDEO_CONSOLE_DEVICE {
@@ -383,6 +405,15 @@ typedef struct _VIDEO_CONSOLE_DEVICE {
     LONG SavedRow;
     LONG SavedAttributes;
     PULONG TabStops;
+    SYSTEM_TIME CreationTime;
+    ULONG OpenHandles;
+    UINTN Size;
+    ULONG BaseVideoMode;
+    ULONG RedMask;
+    ULONG GreenMask;
+    ULONG BlueMask;
+    ULONG PixelsPerScanLine;
+    ULONG BannerThreadEnabled;
 } VIDEO_CONSOLE_DEVICE, *PVIDEO_CONSOLE_DEVICE;
 
 //
@@ -434,6 +465,13 @@ VcDispatchSystemControl (
     );
 
 VOID
+VcDispatchUserControl (
+    PIRP Irp,
+    PVOID DeviceContext,
+    PVOID IrpContext
+    );
+
+VOID
 VcpLocalTerminalRedrawThread (
     PVOID Parameter
     );
@@ -464,6 +502,7 @@ VcpEraseArea (
 VOID
 VcpRedrawArea (
     PVIDEO_CONSOLE_DEVICE Console,
+    BOOL Force,
     LONG StartColumn,
     LONG StartRow,
     LONG EndColumn,
@@ -551,6 +590,7 @@ PIO_HANDLE VcLocalTerminal;
 // ------------------------------------------------------------------ Functions
 //
 
+__USED
 KSTATUS
 DriverEntry (
     PDRIVER Driver
@@ -587,7 +627,6 @@ Return Value:
     PSYSTEM_RESOURCE_HEADER GenericHeader;
     ULONG Height;
     LONG LineSize;
-    PHYSICAL_ADDRESS PhysicalAddress;
     LONG Rows;
     ULONG RowSize;
     KSTATUS Status;
@@ -595,7 +634,6 @@ Return Value:
     ULONG TabStopSize;
     UINTN TopOffset;
     SYSTEM_RESOURCE_FRAME_BUFFER VideoResource;
-    PVOID VirtualAddress;
     ULONG Width;
     TERMINAL_WINDOW_SIZE WindowSize;
 
@@ -609,6 +647,7 @@ Return Value:
     FunctionTable.DispatchClose = VcDispatchClose;
     FunctionTable.DispatchIo = VcDispatchIo;
     FunctionTable.DispatchSystemControl = VcDispatchSystemControl;
+    FunctionTable.DispatchUserControl = VcDispatchUserControl;
     Status = IoRegisterDriverFunctions(Driver, &FunctionTable);
     if (!KSUCCESS(Status)) {
         goto DriverEntryEnd;
@@ -677,10 +716,6 @@ Return Value:
             Rows = Height / VidDefaultFont->CellHeight;
         }
 
-        VirtualAddress = FrameBufferResource->Header.VirtualAddress + TopOffset;
-        PhysicalAddress = FrameBufferResource->Header.PhysicalAddress +
-                          TopOffset;
-
         ConsoleDevice = MmAllocatePagedPool(sizeof(VIDEO_CONSOLE_DEVICE),
                                             VIDEO_CONSOLE_ALLOCATION_TAG);
 
@@ -734,16 +769,36 @@ Return Value:
             goto DriverEntryEnd;
         }
 
-        ConsoleDevice->PhysicalAddress = PhysicalAddress;
-        ConsoleDevice->FrameBuffer = VirtualAddress;
+        ConsoleDevice->PhysicalAddress =
+                                   FrameBufferResource->Header.PhysicalAddress;
+
+        ConsoleDevice->FrameBuffer = FrameBufferResource->Header.VirtualAddress;
+
+        //
+        // The frame buffer must be page aligned because otherwise handing
+        // back direct I/O buffers to the frame buffer won't work for mmap.
+        //
+
+        ASSERT((IS_ALIGNED(ConsoleDevice->PhysicalAddress, MmPageSize())) &&
+               (IS_POINTER_ALIGNED(ConsoleDevice->FrameBuffer, MmPageSize())));
+
         ConsoleDevice->Width = Width;
-        ConsoleDevice->Height = Height;
+        ConsoleDevice->Height = FrameBufferResource->Height;
         ConsoleDevice->BitsPerPixel = FrameBufferResource->BitsPerPixel;
         ConsoleDevice->Columns = Columns;
         ConsoleDevice->ScreenRows = Rows;
         ConsoleDevice->BufferRows = Rows;
         ConsoleDevice->MaxRows = VIDEO_CONSOLE_MAX_LINES;
         ConsoleDevice->Mode = VIDEO_CONSOLE_MODE_DEFAULTS;
+        ConsoleDevice->Size = RowSize * FrameBufferResource->Height;
+        ConsoleDevice->BaseVideoMode = FrameBufferResource->Mode;
+        ConsoleDevice->RedMask = FrameBufferResource->RedMask;
+        ConsoleDevice->GreenMask = FrameBufferResource->GreenMask;
+        ConsoleDevice->BlueMask = FrameBufferResource->BlueMask;
+        ConsoleDevice->PixelsPerScanLine =
+                                        FrameBufferResource->PixelsPerScanLine;
+
+        KeGetSystemTime(&(ConsoleDevice->CreationTime));
 
         //
         // Set up some default tab stops every 8 characters, since things seem
@@ -767,8 +822,12 @@ Return Value:
                       FrameBufferResource,
                       sizeof(SYSTEM_RESOURCE_FRAME_BUFFER));
 
-        VideoResource.Header.VirtualAddress = VirtualAddress;
-        VideoResource.Header.PhysicalAddress = PhysicalAddress;
+        VideoResource.Header.VirtualAddress =
+                                        ConsoleDevice->FrameBuffer + TopOffset;
+
+        VideoResource.Header.PhysicalAddress =
+                                    ConsoleDevice->PhysicalAddress + TopOffset;
+
         VideoResource.Width = Width;
         VideoResource.Height = Height;
         Status = VidInitialize(&(ConsoleDevice->VideoContext), &VideoResource);
@@ -1036,6 +1095,32 @@ Return Value:
 
 {
 
+    PVIDEO_CONSOLE_DEVICE Console;
+    UINTN DataSize;
+    ULONG PreviousHandles;
+
+    Console = (PVIDEO_CONSOLE_DEVICE)DeviceContext;
+    PreviousHandles = RtlAtomicAdd32(&(Console->OpenHandles), 1);
+
+    ASSERT(PreviousHandles < 0x10000000);
+
+    if (PreviousHandles == 0) {
+
+        //
+        // Disable the banner thread since the frame buffer is about to be
+        // owned by user mode. Failure is not fatal, it just means people will
+        // be competing for the frame buffer.
+        //
+
+        Console->BannerThreadEnabled = FALSE;
+        DataSize = sizeof(Console->BannerThreadEnabled);
+        KeGetSetSystemInformation(SystemInformationKe,
+                                  KeInformationBannerThread,
+                                  &(Console->BannerThreadEnabled),
+                                  &DataSize,
+                                  TRUE);
+    }
+
     IoCompleteIrp(VcDriver, Irp, STATUS_SUCCESS);
     return;
 }
@@ -1071,6 +1156,38 @@ Return Value:
 --*/
 
 {
+
+    PVIDEO_CONSOLE_DEVICE Console;
+    UINTN DataSize;
+    ULONG PreviousHandles;
+
+    Console = (PVIDEO_CONSOLE_DEVICE)DeviceContext;
+    PreviousHandles = RtlAtomicAdd32(&(Console->OpenHandles), -1);
+
+    ASSERT((PreviousHandles <= 0x10000000) && (PreviousHandles != 0));
+
+    if (PreviousHandles == 1) {
+
+        //
+        // Re-enable the banner thread if it was previously enabled.
+        //
+
+        if (Console->BannerThreadEnabled != FALSE) {
+            DataSize = sizeof(Console->BannerThreadEnabled);
+            KeGetSetSystemInformation(SystemInformationKe,
+                                      KeInformationBannerThread,
+                                      &(Console->BannerThreadEnabled),
+                                      &DataSize,
+                                      TRUE);
+        }
+
+        VcpRedrawArea(Console,
+                      TRUE,
+                      0,
+                      0,
+                      Console->Columns,
+                      Console->ScreenRows - 1);
+    }
 
     IoCompleteIrp(VcDriver, Irp, STATUS_SUCCESS);
     return;
@@ -1109,52 +1226,73 @@ Return Value:
 {
 
     PVIDEO_CONSOLE_DEVICE Console;
-    UINTN FragmentIndex;
-    UINTN FragmentSize;
-    PIO_BUFFER IoBuffer;
+    ULONGLONG Offset;
     UINTN Size;
     KSTATUS Status;
 
-    ASSERT(Irp->Direction == IrpDown);
-
     Console = (PVIDEO_CONSOLE_DEVICE)DeviceContext;
-
-    //
-    // Fail reads.
-    //
-
-    if (Irp->MinorCode != IrpMinorIoWrite) {
-        Status = STATUS_NOT_SUPPORTED;
-        goto DispatchIoEnd;
-    }
-
-    IoBuffer = Irp->U.ReadWrite.IoBuffer;
-    Status = MmMapIoBuffer(IoBuffer, FALSE, FALSE, FALSE);
-    if (!KSUCCESS(Status)) {
+    Offset = Irp->U.ReadWrite.IoOffset;
+    if (Offset >= Console->Size) {
+        Status = STATUS_END_OF_FILE;
         goto DispatchIoEnd;
     }
 
     Size = Irp->U.ReadWrite.IoSizeInBytes;
-    for (FragmentIndex = 0;
-         FragmentIndex < IoBuffer->FragmentCount;
-         FragmentIndex += 1) {
-
-        FragmentSize = IoBuffer->Fragment[FragmentIndex].Size;
-        if (FragmentSize > Size) {
-            FragmentSize = Size;
-        }
-
-        VcpWriteToConsole(Console,
-                          IoBuffer->Fragment[FragmentIndex].VirtualAddress,
-                          FragmentSize);
-
-        Size -= FragmentSize;
+    if ((Offset + Size < Offset) || (Offset + Size > Console->Size)) {
+        Size = Console->Size - Offset;
     }
 
-    Irp->U.ReadWrite.IoBytesCompleted = Irp->U.ReadWrite.IoSizeInBytes;
-    Status = STATUS_SUCCESS;
+    //
+    // Writes just copy to the frame buffer.
+    //
+
+    if (Irp->MinorCode == IrpMinorIoWrite) {
+        Status = MmCopyIoBufferData(Irp->U.ReadWrite.IoBuffer,
+                                    Console->FrameBuffer + Offset,
+                                    0,
+                                    Size,
+                                    FALSE);
+
+        if (!KSUCCESS(Status)) {
+            goto DispatchIoEnd;
+        }
+
+    } else {
+
+        //
+        // If an I/O buffer was already supplied, then copy into it (for things
+        // like regular user mode reads).
+        //
+
+        if (Irp->U.ReadWrite.IoBuffer->FragmentCount != 0) {
+            Status = MmCopyIoBufferData(Irp->U.ReadWrite.IoBuffer,
+                                        Console->FrameBuffer + Offset,
+                                        0,
+                                        Size,
+                                        TRUE);
+
+        //
+        // Return the frame buffer directly (for things like mmap).
+        //
+
+        } else {
+            Status = MmAppendIoBufferData(Irp->U.ReadWrite.IoBuffer,
+                                          Console->FrameBuffer + Offset,
+                                          Console->PhysicalAddress + Offset,
+                                          Size);
+        }
+
+        if (!KSUCCESS(Status)) {
+            goto DispatchIoEnd;
+        }
+    }
 
 DispatchIoEnd:
+    if (KSUCCESS(Status)) {
+        Irp->U.ReadWrite.IoBytesCompleted = Size;
+        Irp->U.ReadWrite.NewIoOffset = Offset + Size;
+    }
+
     IoCompleteIrp(VcDriver, Irp, Status);
     return;
 }
@@ -1191,12 +1329,224 @@ Return Value:
 
 {
 
-    ASSERT(Irp->MajorCode == IrpMajorSystemControl);
+    PVIDEO_CONSOLE_DEVICE Console;
+    PVOID Context;
+    PSYSTEM_CONTROL_LOOKUP Lookup;
+    PFILE_PROPERTIES Properties;
+    KSTATUS Status;
+
+    Console = (PVIDEO_CONSOLE_DEVICE)DeviceContext;
+    Context = Irp->U.SystemControl.SystemContext;
+    switch (Irp->MinorCode) {
+    case IrpMinorSystemControlLookup:
+        Lookup = (PSYSTEM_CONTROL_LOOKUP)Context;
+        Lookup->Flags = LOOKUP_FLAG_NO_PAGE_CACHE;
+        Lookup->MapFlags = MAP_FLAG_WRITE_THROUGH;
+        Status = STATUS_PATH_NOT_FOUND;
+        if (Lookup->Root != FALSE) {
+
+            //
+            // Enable opening of the root as a single file.
+            //
+
+            Properties = Lookup->Properties;
+            Properties->FileId = 0;
+            Properties->Type = IoObjectCharacterDevice;
+            Properties->HardLinkCount = 1;
+            Properties->BlockSize = 1;
+            Properties->BlockCount = 0;
+            Properties->UserId = 0;
+            Properties->GroupId = 0;
+            Properties->StatusChangeTime = Console->CreationTime;
+            Properties->ModifiedTime = Properties->StatusChangeTime;
+            Properties->AccessTime = Properties->StatusChangeTime;
+            Properties->Permissions = FILE_PERMISSION_ALL;
+            Properties->Size = 0;
+            Status = STATUS_SUCCESS;
+        }
+
+        IoCompleteIrp(VcDriver, Irp, Status);
+        break;
 
     //
-    // Do no processing on any IRPs. Let them flow.
+    // Succeed for the basics.
     //
 
+    case IrpMinorSystemControlWriteFileProperties:
+    case IrpMinorSystemControlTruncate:
+        Status = STATUS_SUCCESS;
+        IoCompleteIrp(VcDriver, Irp, Status);
+        break;
+
+    //
+    // Ignore everything unrecognized.
+    //
+
+    default:
+
+        ASSERT(FALSE);
+
+        break;
+    }
+
+    return;
+}
+
+VOID
+VcDispatchUserControl (
+    PIRP Irp,
+    PVOID DeviceContext,
+    PVOID IrpContext
+    )
+
+/*++
+
+Routine Description:
+
+    This routine handles User Control IRPs.
+
+Arguments:
+
+    Irp - Supplies a pointer to the I/O request packet.
+
+    DeviceContext - Supplies the context pointer supplied by the driver when it
+        attached itself to the driver stack. Presumably this pointer contains
+        driver-specific device context.
+
+    IrpContext - Supplies the context pointer supplied by the driver when
+        the IRP was created.
+
+Return Value:
+
+    None.
+
+--*/
+
+{
+
+    PVIDEO_CONSOLE_DEVICE Console;
+    PVOID CopyAddress;
+    ULONG CopySize;
+    FRAME_BUFFER_INFO Info;
+    FRAME_BUFFER_MODE Mode;
+    KSTATUS Status;
+    PIRP_USER_CONTROL UserControl;
+
+    CopyAddress = NULL;
+    CopySize = 0;
+    Console = (PVIDEO_CONSOLE_DEVICE)DeviceContext;
+    Status = STATUS_SUCCESS;
+    UserControl = &(Irp->U.UserControl);
+    switch ((ULONG)(Irp->MinorCode)) {
+    case FrameBufferGetInfo:
+        if (UserControl->UserBufferSize < sizeof(FRAME_BUFFER_INFO)) {
+            Status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        RtlZeroMemory(&Info, sizeof(Info));
+        Info.Magic = FRAME_BUFFER_MAGIC;
+        RtlStringCopy(Info.Identifier, "VideoCon", sizeof(Info.Identifier));
+        Info.Type = FrameBufferTypeLinear;
+
+        ASSERT((Console->BaseVideoMode == BaseVideoModeFrameBuffer) ||
+               (Console->BaseVideoMode == BaseVideoModeBiosText));
+
+        if (Console->BaseVideoMode == BaseVideoModeBiosText) {
+            Info.Type = FrameBufferTypeText;
+        }
+
+        Info.Address = Console->PhysicalAddress;
+        Info.Length = Console->Size;
+        Info.LineLength = Console->PixelsPerScanLine * Console->BitsPerPixel /
+                          BITS_PER_BYTE;
+
+        CopySize = sizeof(Info);
+        CopyAddress = &Info;
+        break;
+
+    case FrameBufferGetMode:
+        if (UserControl->UserBufferSize < sizeof(FRAME_BUFFER_MODE)) {
+            Status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        RtlZeroMemory(&Mode, sizeof(Mode));
+        Mode.Magic = FRAME_BUFFER_MAGIC;
+        Mode.ResolutionX = Console->Width;
+        Mode.ResolutionY = Console->Height;
+        Mode.VirtualResolutionX = Mode.ResolutionX;
+        Mode.VirtualResolutionY = Mode.ResolutionY;
+        Mode.BitsPerPixel = Console->BitsPerPixel;
+        Mode.RedMask = Console->RedMask;
+        Mode.GreenMask = Console->GreenMask;
+        Mode.BlueMask = Console->BlueMask;
+        CopySize = sizeof(Mode);
+        CopyAddress = &Mode;
+        break;
+
+    case FrameBufferSetMode:
+        if (UserControl->UserBufferSize < sizeof(FRAME_BUFFER_MODE)) {
+            Status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        //
+        // See if there's no difference.
+        //
+
+        if (UserControl->FromKernelMode != FALSE) {
+            RtlCopyMemory(&Mode,
+                          UserControl->UserBuffer,
+                          sizeof(FRAME_BUFFER_MODE));
+
+        } else {
+            Status = MmCopyFromUserMode(&Mode,
+                                        UserControl->UserBuffer,
+                                        sizeof(FRAME_BUFFER_MODE));
+
+            if (!KSUCCESS(Status)) {
+                break;
+            }
+        }
+
+        //
+        // See if there's no change.
+        //
+
+        if ((Mode.ResolutionX == Console->Width) &&
+            (Mode.ResolutionY == Console->Height) &&
+            (Mode.VirtualResolutionX == Mode.ResolutionX) &&
+            (Mode.VirtualResolutionY == Mode.ResolutionY) &&
+            (Mode.BitsPerPixel == Console->BitsPerPixel) &&
+            (Mode.OffsetX == 0) &&
+            (Mode.OffsetY == 0) &&
+            (Mode.Rotate == 0)) {
+
+            Status = STATUS_SUCCESS;
+            break;
+        }
+
+        Status = STATUS_NOT_HANDLED;
+        break;
+
+    default:
+        Status = STATUS_NOT_HANDLED;
+        break;
+    }
+
+    if ((KSUCCESS(Status)) && (CopySize != 0)) {
+        if (UserControl->FromKernelMode != FALSE) {
+            RtlCopyMemory(UserControl->UserBuffer, CopyAddress, CopySize);
+
+        } else {
+            Status = MmCopyToUserMode(UserControl->UserBuffer,
+                                      CopyAddress,
+                                      CopySize);
+        }
+    }
+
+    IoCompleteIrp(VcDriver, Irp, Status);
     return;
 }
 
@@ -1302,11 +1652,14 @@ Return Value:
             Line = GET_CONSOLE_LINE(Device, CursorRow);
             Line->Character[CursorColumn].Data.Attributes ^= BASE_VIDEO_CURSOR;
             CursorAttributes = Line->Character[CursorColumn].Data.Attributes;
-            VcpRedrawArea(Device,
-                          CursorColumn,
-                          CursorRow,
-                          CursorColumn + 1,
-                          CursorRow);
+            if (Device->OpenHandles == 0) {
+                VcpRedrawArea(Device,
+                              FALSE,
+                              CursorColumn,
+                              CursorRow,
+                              CursorColumn + 1,
+                              CursorRow);
+            }
 
             BlinkCount += 1;
 
@@ -1322,7 +1675,7 @@ Return Value:
             break;
         }
 
-        if (BytesRead != 0) {
+        if ((BytesRead != 0) && (Device->OpenHandles == 0)) {
             BlinkCount = 0;
             VcpWriteToConsole(Device, ReadBuffer, BytesRead);
         }
@@ -1693,7 +2046,7 @@ Return Value:
     // Redraw the portion of the screen that was modified.
     //
 
-    VcpRedrawArea(Console, StartColumn, StartRow, EndColumn, EndRow);
+    VcpRedrawArea(Console, FALSE, StartColumn, StartRow, EndColumn, EndRow);
     KeReleaseQueuedLock(Console->Lock);
     return;
 }
@@ -2530,6 +2883,7 @@ Return Value:
 VOID
 VcpRedrawArea (
     PVIDEO_CONSOLE_DEVICE Console,
+    BOOL Force,
     LONG StartColumn,
     LONG StartRow,
     LONG EndColumn,
@@ -2545,6 +2899,10 @@ Routine Description:
 Arguments:
 
     Console - Supplies a pointer to the video console to write to.
+
+    Force - Supplies a boolean indicating whether or not to redraw characters
+        even if supposedly unnecessary. Set this if someone else has drawn on
+        the frame buffer.
 
     StartColumn - Supplies the starting column, inclusive, to redraw at.
 
@@ -2568,7 +2926,9 @@ Return Value:
     LONG CurrentColumn;
     LONG CurrentRow;
     LONG EndColumnThisRow;
+    LONG Height;
     PVIDEO_CONSOLE_LINE Line;
+    LONG Remainder;
     PBASE_VIDEO_CHARACTER ScreenCharacters;
     PVIDEO_CONSOLE_LINE ScreenLine;
     LONG StartDrawColumn;
@@ -2583,7 +2943,7 @@ Return Value:
     ASSERT((StartColumn <= Console->Columns) &&
            (EndColumn <= Console->Columns));
 
-    ASSERT((StartRow < Console->ScreenRows) && (EndRow <= Console->ScreenRows));
+    ASSERT((StartRow < Console->ScreenRows) && (EndRow < Console->ScreenRows));
 
     if (StartColumn >= Console->Columns) {
         StartColumn = Console->Columns - 1;
@@ -2667,26 +3027,36 @@ Return Value:
                 // Skip characters that are already drawn correctly.
                 //
 
-                if (ScreenCharacters[CurrentColumn].AsUint32 ==
-                    Characters[CurrentColumn].AsUint32) {
+                if (Force == FALSE) {
+                    if (ScreenCharacters[CurrentColumn].AsUint32 ==
+                        Characters[CurrentColumn].AsUint32) {
 
-                    CurrentColumn += 1;
-                    continue;
-                }
+                        CurrentColumn += 1;
+                        continue;
+                    }
 
-                //
-                // Collect characters that need redrawing.
-                //
+                    //
+                    // Collect characters that need redrawing.
+                    //
 
-                StartDrawColumn = CurrentColumn;
-                while ((CurrentColumn < EndColumnThisRow) &&
-                       (ScreenCharacters[CurrentColumn].AsUint32 !=
-                        Characters[CurrentColumn].AsUint32)) {
+                    StartDrawColumn = CurrentColumn;
+                    while ((CurrentColumn < EndColumnThisRow) &&
+                           (ScreenCharacters[CurrentColumn].AsUint32 !=
+                            Characters[CurrentColumn].AsUint32)) {
 
-                    ScreenCharacters[CurrentColumn].AsUint32 =
+                        ScreenCharacters[CurrentColumn].AsUint32 =
                                             Characters[CurrentColumn].AsUint32;
 
-                    CurrentColumn += 1;
+                        CurrentColumn += 1;
+                    }
+
+                //
+                // Redraw the whole row.
+                //
+
+                } else {
+                    StartDrawColumn = CurrentColumn;
+                    CurrentColumn = EndColumnThisRow;
                 }
 
                 VidPrintCharacters(&(Console->VideoContext),
@@ -2703,24 +3073,34 @@ Return Value:
                 // Skip characters that are already blank.
                 //
 
-                if (ScreenCharacters[CurrentColumn].AsUint32 ==
-                    Blank.AsUint32) {
+                if (Force == FALSE) {
+                    if (ScreenCharacters[CurrentColumn].AsUint32 ==
+                        Blank.AsUint32) {
 
-                    CurrentColumn += 1;
-                    continue;
-                }
+                        CurrentColumn += 1;
+                        continue;
+                    }
+
+                    //
+                    // Batch together characters that need redrawing.
+                    //
+
+                    StartDrawColumn = CurrentColumn;
+                    while ((CurrentColumn < EndColumnThisRow) &&
+                           (ScreenCharacters[CurrentColumn].AsUint32 !=
+                            Blank.AsUint32)) {
+
+                        ScreenCharacters[CurrentColumn] = Blank;
+                        CurrentColumn += 1;
+                    }
 
                 //
-                // Batch together characters that need redrawing.
+                // Redraw the whole row.
                 //
 
-                StartDrawColumn = CurrentColumn;
-                while ((CurrentColumn < EndColumnThisRow) &&
-                       (ScreenCharacters[CurrentColumn].AsUint32 !=
-                        Blank.AsUint32)) {
-
-                    ScreenCharacters[CurrentColumn] = Blank;
-                    CurrentColumn += 1;
+                } else {
+                    StartDrawColumn = CurrentColumn;
+                    CurrentColumn = EndColumnThisRow;
                 }
 
                 VidPrintCharacters(&(Console->VideoContext),
@@ -2745,6 +3125,39 @@ Return Value:
 
         CurrentColumn = 0;
         CurrentRow += 1;
+    }
+
+    //
+    // If clearing the whole screen, also clear any remainder along the right
+    // and bottom edges that doesn't divide evenly by text cell.
+    //
+
+    if ((Force != FALSE) &&
+        (StartRow == 0) && (StartColumn == 0) &&
+        (EndRow >= Console->ScreenRows - 1) &&
+        (EndColumn >= Console->Columns - 1)) {
+
+        Width = Console->VideoContext.Width;
+        Height = Console->VideoContext.Height;
+        Remainder = Console->Columns * Console->VideoContext.Font->CellWidth;
+        if (Remainder < Width) {
+            VidClearScreen(&(Console->VideoContext),
+                           Remainder,
+                           0,
+                           Width,
+                           Height);
+        }
+
+        Remainder = Console->ScreenRows *
+                    Console->VideoContext.Font->CellHeight;
+
+        if (Remainder < Height) {
+            VidClearScreen(&(Console->VideoContext),
+                           0,
+                           Remainder,
+                           Width,
+                           Height);
+        }
     }
 
     return;

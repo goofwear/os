@@ -9,12 +9,12 @@
 #
 #   Binary Name:
 #
-#       Native Debugger
+#       Minoca Debugger
 #
 #   Abstract:
 #
-#       This program implements the native debugger (command line version),
-#       which runs on Minoca OS.
+#       This program implements the debugger (command line version), targeted
+#       at Minoca OS.
 #
 #   Author:
 #
@@ -36,7 +36,7 @@ INCLUDES += $(SRCDIR)/..;                        \
             $(SRCROOT)/os/lib/im;                \
             $(SRCROOT)/os/apps/libc/include;
 
-TARGETLIBS = $(OBJROOT)/os/lib/im/im.a                  \
+TARGETLIBS = $(OBJROOT)/os/lib/im/imu.a          \
 
 DYNLIBS = -lminocaos
 
@@ -45,9 +45,10 @@ VPATH += $(SRCDIR)/..:
 include $(SRCDIR)/../sources
 
 OBJS = $(COMMON_OBJS)   \
-       cmdln.o          \
-       extsup.o         \
-       sock.o           \
+       ptrace.o         \
+       uos/commos.o     \
+       uos/extsup.o     \
+       uos/sock.o       \
 
 include $(SRCROOT)/os/minoca.mk
 

@@ -77,13 +77,6 @@ extern LIST_ENTRY NetDataLinkList;
 extern PSHARED_EXCLUSIVE_LOCK NetPluginListLock;
 
 //
-// Define the list of raw sockets. These do not get put in the socket trees.
-//
-
-extern LIST_ENTRY NetRawSocketsList;
-extern PSHARED_EXCLUSIVE_LOCK NetRawSocketsLock;
-
-//
 // -------------------------------------------------------- Function Prototypes
 //
 
@@ -331,6 +324,27 @@ NetpRawInitialize (
 Routine Description:
 
     This routine initializes support for raw sockets.
+
+Arguments:
+
+    None.
+
+Return Value:
+
+    None.
+
+--*/
+
+VOID
+NetpIgmpInitialize (
+    VOID
+    );
+
+/*++
+
+Routine Description:
+
+    This routine initializes support for the IGMP protocol.
 
 Arguments:
 

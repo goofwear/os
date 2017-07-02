@@ -27,12 +27,17 @@
 
 BINARY = krtl.a
 
-BINARYTYPE = library
+BINARYTYPE = klibrary
 
 INCLUDES += $(SRCDIR)/..;
 
 OBJS = assert.o  \
        kprint.o  \
+       pdouble.o \
+
+ifeq ($(ARCH),x64)
+DIRS += x6432
+endif
 
 include $(SRCROOT)/os/minoca.mk
 

@@ -29,7 +29,7 @@
 
 BINARY = netcore.drv
 
-BINARYTYPE = so
+BINARYTYPE = driver
 
 BINPLACE = bin
 
@@ -38,6 +38,7 @@ OBJS = addr.o            \
        buf.o             \
        dhcp.o            \
        ethernet.o        \
+       igmp.o            \
        ip4.o             \
        netcore.o         \
        raw.o             \

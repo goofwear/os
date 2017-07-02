@@ -45,23 +45,46 @@ OBJS = bsearch.o           \
        getoptst.o          \
        abs.o               \
        ceil.o              \
+       ceilf.o             \
        exp.o               \
+       expf.o              \
+       exp2.o              \
+       exp2f.o             \
        expm1.o             \
+       expm1f.o            \
        floor.o             \
+       floorf.o            \
        fmod.o              \
+       fmodf.o             \
        hypot.o             \
+       hypotf.o            \
        log.o               \
+       logf.o              \
        log2.o              \
+       log2f.o             \
        log10.o             \
+       log10f.o            \
+       minmax.o            \
+       minmaxf.o           \
        modf.o              \
+       modff.o             \
        pow.o               \
+       powf.o              \
        scalbn.o            \
+       scalbnf.o           \
        sqrt.o              \
+       sqrtf.o             \
        trig.o              \
+       trigf.o             \
        trigarc.o           \
+       trigarcf.o          \
        trighyp.o           \
+       trighypf.o          \
+       trunc.o             \
+       truncf.o            \
        util.o              \
        mathtst.o           \
+       mathftst.o          \
        qsort.o             \
        qsorttst.o          \
        regexcmp.o          \

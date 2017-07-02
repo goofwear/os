@@ -42,7 +42,9 @@ include $(SRCDIR)/../sources
 TARGETLIBS = $(OBJROOT)/os/apps/ck/modules/app/build/app.a       \
              $(OBJROOT)/os/apps/ck/modules/bundle/build/bundle.a \
 
-ifeq ($(OS),Windows_NT)
+OS ?= $(shell uname -s)
+
+ifeq ($(OS),$(filter Windows_NT cygwin,$(OS)))
 
 OBJS += $(WIN32_OBJS)
 
@@ -52,14 +54,17 @@ else
 
 OBJS += $(POSIX_OBJS)
 
-DYNLIBS = $(OBJROOT)/os/apps/ck/lib/build/dynamic/libchalk.so.1
+ifeq ($(OS),Darwin)
 
+DYNLIBS = $(OBJROOT)/os/apps/ck/lib/build/dynamic/libchalk.1.dylib
+EXTRA_LDFLAGS += -Wl,-rpath,@executable_path/../lib
+
+else
+
+DYNLIBS = $(OBJROOT)/os/apps/ck/lib/build/dynamic/libchalk.so.1
+EXTRA_LDFLAGS += -Wl,-rpath='$$ORIGIN/../lib'
+endif
 endif
 
 include $(SRCROOT)/os/minoca.mk
 
-ifeq ($(OS),Darwin)
-
-DYNLIBS = $(OBJROOT)/os/apps/ck/lib/build/dynamic/libchalk.1.dylib
-
-endif

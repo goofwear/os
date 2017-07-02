@@ -352,7 +352,7 @@ BOOL
 IopIsIoBufferPageCacheBackedHelper (
     PFILE_OBJECT FileObject,
     PIO_BUFFER IoBuffer,
-    IO_OFFSET Offset,
+    IO_OFFSET FileOffset,
     UINTN SizeInBytes
     );
 
@@ -739,7 +739,8 @@ Return Value:
 
 PHYSICAL_ADDRESS
 IoGetPageCacheEntryPhysicalAddress (
-    PPAGE_CACHE_ENTRY Entry
+    PPAGE_CACHE_ENTRY Entry,
+    PULONG MapFlags
     )
 
 /*++
@@ -752,6 +753,9 @@ Arguments:
 
     Entry - Supplies a pointer to a page cache entry.
 
+    MapFlags - Supplies an optional pointer to the additional mapping flags
+        mandated by the underlying file object.
+
 Return Value:
 
     Returns the physical address of the given page cache entry.
@@ -759,6 +763,10 @@ Return Value:
 --*/
 
 {
+
+    if (MapFlags != NULL) {
+        *MapFlags = Entry->FileObject->MapFlags;
+    }
 
     return Entry->PhysicalAddress;
 }
@@ -2445,6 +2453,7 @@ Return Value:
 {
 
     BOOL Backed;
+    UINTN CheckSize;
     ULONG PageSize;
 
     ASSERT(IoBuffer->FragmentCount != 0);
@@ -2455,10 +2464,15 @@ Return Value:
     //
 
     PageSize = MmPageSize();
+    CheckSize = SizeInBytes;
+    if (CheckSize > PageSize) {
+        CheckSize = PageSize;
+    }
+
     Backed = IopIsIoBufferPageCacheBackedHelper(FileObject,
                                                 IoBuffer,
                                                 Offset,
-                                                PageSize);
+                                                CheckSize);
 
     //
     // Assert that the assumption above is correct.
@@ -2468,8 +2482,7 @@ Return Value:
            (IopIsIoBufferPageCacheBackedHelper(FileObject,
                                                IoBuffer,
                                                Offset,
-                                               ALIGN_RANGE_UP(SizeInBytes,
-                                                              PageSize))));
+                                               SizeInBytes)));
 
     return Backed;
 }
@@ -4005,7 +4018,7 @@ Return Value:
     FileObject = CacheEntry->FileObject;
     FileOffset = CacheEntry->Offset;
     PageSize = MmPageSize();
-    READ_INT64_SYNC(&(FileObject->Properties.FileSize), &FileSize);
+    FileSize = FileObject->Properties.Size;
 
     //
     // This routine assumes that the file object lock is held shared when it
@@ -4840,7 +4853,7 @@ BOOL
 IopIsIoBufferPageCacheBackedHelper (
     PFILE_OBJECT FileObject,
     PIO_BUFFER IoBuffer,
-    IO_OFFSET Offset,
+    IO_OFFSET FileOffset,
     UINTN SizeInBytes
     )
 
@@ -4859,7 +4872,7 @@ Arguments:
 
     IoBuffer - Supplies a pointer to an I/O buffer.
 
-    Offset - Supplies an offset into the file or device object.
+    FileOffset - Supplies an offset into the file or device object.
 
     SizeInBytes - Supplies the number of bytes in the I/O buffer that should be
         cache backed.
@@ -4875,14 +4888,46 @@ Return Value:
 
     UINTN BufferOffset;
     PPAGE_CACHE_ENTRY CacheEntry;
+    IO_OFFSET EndOffset;
+    UINTN OffsetShift;
     ULONG PageSize;
 
     PageSize = MmPageSize();
 
-    ASSERT(IS_ALIGNED(SizeInBytes, PageSize) != FALSE);
+    //
+    // I/O may still be page cache backed even if the given file offset is not
+    // page aligned. The contrapositive is also true - I/O may not be page
+    // cache backed even if the given file offset is page aligned. These
+    // scenarios can occur if the I/O buffer's current offset is not page
+    // aligned. For example, writing 512 bytes to a file at offset 512 can be
+    // considered page cache backed as long as the I/O buffer's offset is 512
+    // and the I/O buffer's first page cache entry has a file offset of 0. And
+    // writing 512 bytes to offset 4096 isn't page cache backed if the I/O
+    // buffer's offset is 512; no page cache entry is going to have a file
+    // offset of 3584.
+    //
+    // To account for this, align the I/O buffer and file offsets back to the
+    // nearest page boundary. This makes the local buffer offset negative, but
+    // the routine that gets the page cache entry adds the current offset back.
+    //
 
-    BufferOffset = 0;
-    while (SizeInBytes != 0) {
+    OffsetShift = MmGetIoBufferCurrentOffset(IoBuffer);
+    OffsetShift = REMAINDER(OffsetShift, PageSize);
+    BufferOffset = -OffsetShift;
+    FileOffset -= OffsetShift;
+    SizeInBytes += OffsetShift;
+
+    //
+    // All page cache entries have page aligned offsets. They will never match
+    // a file offset that isn't aligned.
+    //
+
+    if (IS_ALIGNED(FileOffset, PageSize) == FALSE) {
+        return FALSE;
+    }
+
+    EndOffset = FileOffset + SizeInBytes;
+    while (FileOffset < EndOffset) {
 
         //
         // If this page in the buffer is not backed by a page cache entry or
@@ -4894,14 +4939,13 @@ Return Value:
         if ((CacheEntry == NULL) ||
             (CacheEntry->FileObject != FileObject) ||
             (CacheEntry->Node.Parent == NULL) ||
-            (CacheEntry->Offset != Offset)) {
+            (CacheEntry->Offset != FileOffset)) {
 
             return FALSE;
         }
 
-        SizeInBytes -= PageSize;
         BufferOffset += PageSize;
-        Offset += PageSize;
+        FileOffset += PageSize;
     }
 
     return TRUE;

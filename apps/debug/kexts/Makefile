@@ -27,22 +27,26 @@
 
 BINARY = kexts.so
 
-BINARYTYPE = dll
+BINARYTYPE = so
 
 BINPLACE = bin
 
 TARGETLIBS = $(BINROOT)/dbgext.a
 
-X86_OBJS = acpiext.o  \
-           kexts.o    \
-           memory.o   \
-           objects.o  \
-           reslist.o  \
-           threads.o  \
+OBJS = acpiext.o  \
+       kexts.o    \
+       memory.o   \
+       objects.o  \
+       reslist.o  \
+       threads.o  \
 
 ifeq ($(OS),Windows_NT)
 
 DIRS = win32
+
+else
+
+DIRS = uos
 
 endif
 

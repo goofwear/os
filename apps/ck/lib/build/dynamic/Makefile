@@ -35,7 +35,7 @@ BINARYTYPE = so
 
 BUILD = yes
 
-BINPLACE = tools/bin
+BINPLACE = tools/lib
 
 INCLUDES += $(SRCDIR)/..;
 
@@ -43,10 +43,12 @@ VPATH += ..:
 
 include $(SRCDIR)/../../sources
 
-ifeq ($(OS),Windows_NT)
+OS ?= $(shell uname -s)
+
+ifeq ($(OS),$(filter Windows_NT cygwin,$(OS)))
 
 BINARY := chalk.dll
-BINARYTYPE := dll
+BINPLACE := tools/bin
 
 OBJS += $(WIN32_OBJS)
 
@@ -56,17 +58,16 @@ OBJS += $(POSIX_OBJS)
 
 ifeq ($(shell uname -s),Darwin)
 BINARY := libchalk.$(SO_VERSION_MAJOR).dylib
+EXTRA_LDFLAGS += -install_name @rpath/libchalk.$(SO_VERSION_MAJOR).dylib
 endif
 
 endif
 
 TARGETLIBS = $(OBJROOT)/os/lib/yy/build/yy.a                     \
-             $(OBJROOT)/os/lib/rtl/base/build/basertl.a          \
-             $(OBJROOT)/os/lib/rtl/rtlc/build/rtlc.a             \
 
 include $(SRCROOT)/os/minoca.mk
 
-ifneq ($(OS),$(filter Windows_NT Minoca,$(OS)))
+ifneq ($(OS),$(filter Windows_NT Minoca FreeBSD,$(OS)))
 
 DYNLIBS += -ldl
 

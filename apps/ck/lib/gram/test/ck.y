@@ -61,12 +61,17 @@ dictionary
     | '{' dictionary_element_list ',' '}'
     ;
 
+string_literal_list
+    : STRING_LITERAL
+    | string_literal_list STRING_LITERAL
+    ;
+
 primary_expression
     : IDENTIFIER
     | CONSTANT
     | HEX_CONSTANT
     | BINARY_CONSTANT
-    | STRING_LITERAL
+    | string_literal_list
     | NULL_TOKEN
     | THIS
     | SUPER
@@ -177,6 +182,7 @@ variable_definition
 
 statement
     : function_definition
+    | function_declaration
     | variable_definition
     | expression_statement
     | selection_statement
@@ -253,8 +259,14 @@ function_definition
     | STATIC FUNCTION IDENTIFIER '(' identifier_list ')' compound_statement
     ;
 
+function_declaration
+    : FUNCTION IDENTIFIER '(' identifier_list ')' ';'
+    | STATIC FUNCTION IDENTIFIER '(' identifier_list ')' ';'
+    ;
+
 class_member
     : function_definition
+    | function_declaration
     | variable_declaration
     ;
 

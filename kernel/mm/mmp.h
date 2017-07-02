@@ -221,6 +221,9 @@ Members:
 
     MaxTouched - Stores the maximum address that has been accessed.
 
+    MapFlags - Stores an additional bitmask of MAP_FLAG_* definitions to OR in
+        to any mappings of this section.
+
 --*/
 
 typedef struct _IMAGE_SECTION IMAGE_SECTION, *PIMAGE_SECTION;
@@ -246,6 +249,7 @@ struct _IMAGE_SECTION {
     UINTN ImageBackingReferenceCount;
     PVOID MinTouched;
     PVOID MaxTouched;
+    ULONG MapFlags;
 };
 
 /*++
@@ -402,7 +406,7 @@ KSTATUS
 MmpInitializePhysicalPageAllocator (
     PMEMORY_DESCRIPTOR_LIST MemoryMap,
     PVOID *InitMemory,
-    PULONG InitMemorySize
+    PUINTN InitMemorySize
     );
 
 /*++
@@ -514,6 +518,40 @@ Arguments:
 Return Value:
 
     Returns a physical pointer to the memory on success, or NULL on failure.
+
+--*/
+
+KSTATUS
+MmpAllocateScatteredPhysicalPages (
+    PHYSICAL_ADDRESS MinPhysical,
+    PHYSICAL_ADDRESS MaxPhysical,
+    PPHYSICAL_ADDRESS Pages,
+    UINTN PageCount
+    );
+
+/*++
+
+Routine Description:
+
+    This routine allocates a set of any physical pages.
+
+Arguments:
+
+    MinPhysical - Supplies the minimum physical address for the allocations,
+        inclusive.
+
+    MaxPhysical - Supplies the maximum physical address to allocate, exclusive.
+
+    Pages - Supplies a pointer to an array where the physical addresses
+        allocated will be returned.
+
+    PageCount - Supplies the number of pages to allocate.
+
+Return Value:
+
+    STATUS_SUCCESS on success.
+
+    STATUS_NO_MEMORY on failure.
 
 --*/
 

@@ -37,18 +37,19 @@ VPATH += ..:
 
 include $(SRCDIR)/../../sources
 
-ifeq ($(OS),Windows_NT)
+OS ?= $(shell uname -s)
+
+ifeq ($(OS),$(filter Windows_NT cygwin,$(OS)))
 
 BINARY := os.dll
-BINARYTYPE := dll
 
-# OBJS += $(WIN32_OBJS)
+OBJS += $(WIN32_OBJS)
 
-DYNLIBS = $(OBJROOT)/os/apps/ck/lib/build/dynamic/chalk.dll
+DYNLIBS = $(OBJROOT)/os/apps/ck/lib/build/dynamic/chalk.dll -lws2_32
 
 else
 
-# OBJS += $(POSIX_OBJS)
+OBJS += $(POSIX_OBJS)
 
 endif
 

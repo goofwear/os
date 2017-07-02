@@ -373,6 +373,7 @@ SD_FUNCTION_TABLE SdRk32FunctionTable = {
 // ------------------------------------------------------------------ Functions
 //
 
+__USED
 KSTATUS
 DriverEntry (
     PDRIVER Driver
@@ -1014,15 +1015,13 @@ Return Value:
             // Enable opening of the root as a single file.
             //
 
-            Properties = &(Lookup->Properties);
+            Properties = Lookup->Properties;
             Properties->FileId = 0;
             Properties->Type = IoObjectBlockDevice;
             Properties->HardLinkCount = 1;
             Properties->BlockCount = Child->BlockCount;
             Properties->BlockSize = 1 << Child->BlockShift;
-            WRITE_INT64_SYNC(&(Properties->FileSize),
-                             Child->BlockCount << Child->BlockShift);
-
+            Properties->Size = Child->BlockCount << Child->BlockShift;
             Status = STATUS_SUCCESS;
         }
 
@@ -1037,7 +1036,7 @@ Return Value:
     case IrpMinorSystemControlWriteFileProperties:
         FileOperation = (PSYSTEM_CONTROL_FILE_OPERATION)Context;
         Properties = FileOperation->FileProperties;
-        READ_INT64_SYNC(&(Properties->FileSize), &PropertiesFileSize);
+        PropertiesFileSize = Properties->Size;
         if ((Properties->FileId != 0) ||
             (Properties->Type != IoObjectBlockDevice) ||
             (Properties->HardLinkCount != 1) ||

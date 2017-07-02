@@ -2205,7 +2205,7 @@ Arguments:
         The section to be locked or unlocked starts at the current offset in
         the file and extends forward for a positve size or backwards for a
         negative size (the preceding bytes up to but not including the current
-        offset). If size is 0, the section from teh current offset through the
+        offset). If size is 0, the section from the current offset through the
         largest possible offset shall be locked. Locks may exist past the
         current end of file.
 
@@ -3786,6 +3786,60 @@ Return Value:
 --*/
 
 LIBC_API
+int
+sethostname (
+    const char *Name,
+    size_t Size
+    );
+
+/*++
+
+Routine Description:
+
+    This routine sets the network host name for the current machine.
+
+Arguments:
+
+    Name - Supplies a pointer to the new name to set.
+
+    Size - Supplies the size of the name, not including a null terminator.
+
+Return Value:
+
+    0 on success.
+
+    -1 on failure, and errno will be set to indicate the error.
+
+--*/
+
+LIBC_API
+int
+setdomainname (
+    const char *Name,
+    size_t Size
+    );
+
+/*++
+
+Routine Description:
+
+    This routine sets the network domain name for the current machine.
+
+Arguments:
+
+    Name - Supplies a pointer to the new name to set.
+
+    Size - Supplies the size of the name, not including a null terminator.
+
+Return Value:
+
+    0 on success.
+
+    -1 on failure, and errno will be set to indicate the error.
+
+--*/
+
+LIBC_API
 void
 swab (
     const void *Source,
@@ -3996,6 +4050,37 @@ Return Value:
 
     -1 if a non-option was encountered. In this case the optind global variable
     will be set to the first non-option argument.
+
+--*/
+
+LIBC_API
+int
+nice (
+    int Increment
+    );
+
+/*++
+
+Routine Description:
+
+    This routine adds the given value to the current process' nice value. A
+    process' nice value is a non-negative number for which a more positive
+    value results in less favorable scheduling. Valid nice values are between
+    0 and 2 * NZERO - 1.
+
+Arguments:
+
+    Increment - Supplies the increment to add to the current nice value.
+
+Return Value:
+
+    Returns the new nice value minus NZERO. Note that this can result in a
+    successful return value of -1. Callers checking for errors should set
+    errno to 0 before calling this function, then check errno after.
+
+    -1 on failure, and errno will be set to indicate more information. This may
+    fail with EPERM if the increment is negative and the caller does not have
+    appropriate privileges.
 
 --*/
 

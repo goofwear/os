@@ -26,17 +26,15 @@
 #
 ################################################################################
 
-BINARY = dbgext.a
-
-BINARYTYPE = library
-
-BINPLACE = bin
-
-OBJS = extimp.o   \
+DIRS = minoca
 
 ifeq ($(OS),Windows_NT)
 
-DIRS = win32
+DIRS += win32
+
+else
+
+DIRS += uos
 
 endif
 

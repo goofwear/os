@@ -48,18 +48,25 @@ OBJS = $(COMMON_OBJS)   \
        dw.o             \
 
 ##
-## Add the login related apps on everything except Mac OS.
+## Add the login related apps on everything except Mac OS and FreeBSD.
 ##
 
 ifneq ($(shell uname -s),Darwin)
+ifneq ($(shell uname -s),FreeBSD)
+ifeq ($(findstring CYGWIN,$(shell uname -s)),)
 OBJS += $(LOGIN_OBJS)
+endif
+endif
 endif
 
 TARGETLIBS = $(OBJROOT)/os/lib/termlib/build/termlib.a                       \
-             $(OBJROOT)/os/lib/rtl/rtlc/build/rtlc.a                         \
+             $(OBJROOT)/os/lib/rtl/urtl/rtlc/build/rtlc.a                    \
              $(OBJROOT)/os/lib/rtl/base/build/basertl.a                      \
 
-DYNLIBS += -ldl -lutil
+ifneq ($(shell uname -s),FreeBSD)
+DYNLIBS += -ldl
+endif
+DYNLIBS += -lutil
 
 include $(SRCROOT)/os/minoca.mk
 

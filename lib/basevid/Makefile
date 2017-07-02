@@ -28,9 +28,14 @@
 
 BINARY = basevid.a
 
-BINARYTYPE = library
+BINARYTYPE = klibrary
 
 OBJS = fontdata.o \
        textvid.o  \
 
+ifeq ($(ARCH),x64)
+DIRS += x6432
+endif
+
 include $(SRCROOT)/os/minoca.mk
+

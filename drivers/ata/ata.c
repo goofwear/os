@@ -321,6 +321,7 @@ DISK_INTERFACE AtaDiskInterfaceTemplate = {
 // ------------------------------------------------------------------ Functions
 //
 
+__USED
 KSTATUS
 DriverEntry (
     PDRIVER Driver
@@ -1319,15 +1320,13 @@ Return Value:
             // Enable opening of the root as a single file.
             //
 
-            Properties = &(Lookup->Properties);
+            Properties = Lookup->Properties;
             Properties->FileId = 0;
             Properties->Type = IoObjectBlockDevice;
             Properties->HardLinkCount = 1;
             Properties->BlockSize = ATA_SECTOR_SIZE;
             Properties->BlockCount = Device->TotalSectors;
-            WRITE_INT64_SYNC(&(Properties->FileSize),
-                             Device->TotalSectors * ATA_SECTOR_SIZE);
-
+            Properties->Size = Device->TotalSectors * ATA_SECTOR_SIZE;
             Status = STATUS_SUCCESS;
         }
 
@@ -1342,7 +1341,7 @@ Return Value:
     case IrpMinorSystemControlWriteFileProperties:
         FileOperation = (PSYSTEM_CONTROL_FILE_OPERATION)Context;
         Properties = FileOperation->FileProperties;
-        READ_INT64_SYNC(&(Properties->FileSize), &PropertiesFileSize);
+        PropertiesFileSize = Properties->Size;
         if ((Properties->FileId != 0) ||
             (Properties->Type != IoObjectBlockDevice) ||
             (Properties->HardLinkCount != 1) ||
@@ -2438,6 +2437,12 @@ Return Value:
         }
     }
 
+    OldRunLevel = RunLevelCount;
+    if (HaveDpcLock == FALSE) {
+        OldRunLevel = KeRaiseRunLevel(RunLevelDispatch);
+        KeAcquireSpinLock(&(Device->Controller->DpcLock));
+    }
+
     Status = AtapSelectDevice(Device, FALSE);
     if (!KSUCCESS(Status)) {
         goto PerformDmaIoEnd;
@@ -2448,10 +2453,6 @@ Return Value:
     //
 
     AtapSetupCommand(Device, Lba48, 0, (ULONG)SectorCount, BlockAddress, 0);
-    if (HaveDpcLock == FALSE) {
-        OldRunLevel = KeRaiseRunLevel(RunLevelDispatch);
-        KeAcquireSpinLock(&(Device->Controller->DpcLock));
-    }
 
     //
     // Enable interrupts and start the command.
@@ -2494,14 +2495,14 @@ Return Value:
                       IDE_STATUS_INTERRUPT | IDE_STATUS_ERROR);
 
     AtapWriteRegister(Device->Channel, AtaRegisterBusMasterCommand, DmaCommand);
+    Status = STATUS_SUCCESS;
+
+PerformDmaIoEnd:
     if (HaveDpcLock == FALSE) {
         KeReleaseSpinLock(&(Device->Controller->DpcLock));
         KeLowerRunLevel(OldRunLevel);
     }
 
-    Status = STATUS_SUCCESS;
-
-PerformDmaIoEnd:
     return Status;
 }
 
@@ -2709,14 +2710,19 @@ Return Value:
 
 {
 
+    RUNLEVEL OldRunLevel;
     KSTATUS Status;
 
     KeAcquireQueuedLock(Device->Channel->Lock);
+    OldRunLevel = KeRaiseRunLevel(RunLevelDispatch);
+    KeAcquireSpinLock(&(Device->Controller->DpcLock));
     Status = AtapSelectDevice(Device, FALSE);
     if (KSUCCESS(Status)) {
         Status = AtapExecuteCacheFlush(Device, FALSE);
     }
 
+    KeReleaseSpinLock(&(Device->Controller->DpcLock));
+    KeLowerRunLevel(OldRunLevel);
     KeReleaseQueuedLock(Device->Channel->Lock);
     return Status;
 }
@@ -3009,6 +3015,7 @@ Return Value:
     PATA_CHANNEL Channel;
     PUSHORT CurrentBuffer;
     UCHAR DeviceStatus;
+    RUNLEVEL OldRunLevel;
     PATA_QUERY_TIME_COUNTER QueryTimeCounter;
     KSTATUS Status;
     ULONGLONG Timeout;
@@ -3023,8 +3030,11 @@ Return Value:
     //
 
     QueryTimeCounter = ATA_GET_TIME_FUNCTION(CriticalMode);
+    OldRunLevel = RunLevelCount;
     if (CriticalMode == FALSE) {
         KeAcquireQueuedLock(Channel->Lock);
+        OldRunLevel = KeRaiseRunLevel(RunLevelDispatch);
+        KeAcquireSpinLock(&(Device->Controller->DpcLock));
     }
 
     //
@@ -3207,6 +3217,8 @@ Return Value:
 
 PioCommandEnd:
     if (CriticalMode == FALSE) {
+        KeReleaseSpinLock(&(Device->Controller->DpcLock));
+        KeLowerRunLevel(OldRunLevel);
         KeReleaseQueuedLock(Channel->Lock);
     }
 

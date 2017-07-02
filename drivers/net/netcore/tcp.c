@@ -97,7 +97,8 @@ NetpTcpCreateSocket (
     PNET_PROTOCOL_ENTRY ProtocolEntry,
     PNET_NETWORK_ENTRY NetworkEntry,
     ULONG NetworkProtocol,
-    PNET_SOCKET *NewSocket
+    PNET_SOCKET *NewSocket,
+    ULONG Phase
     );
 
 VOID
@@ -151,20 +152,13 @@ NetpTcpSend (
 
 VOID
 NetpTcpProcessReceivedData (
-    PNET_LINK Link,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress,
-    PNET_PROTOCOL_ENTRY ProtocolEntry
+    PNET_RECEIVE_CONTEXT ReceiveContext
     );
 
 KSTATUS
 NetpTcpProcessReceivedSocketData (
-    PNET_LINK Link,
     PNET_SOCKET Socket,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress
+    PNET_RECEIVE_CONTEXT ReceiveContext
     );
 
 KSTATUS
@@ -202,20 +196,14 @@ NetpTcpWorkerThread (
 VOID
 NetpTcpProcessPacket (
     PTCP_SOCKET Socket,
-    PNET_LINK Link,
-    PTCP_HEADER Header,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress
+    PNET_RECEIVE_CONTEXT ReceiveContext,
+    PTCP_HEADER Header
     );
 
 VOID
 NetpTcpHandleUnconnectedPacket (
-    PNET_LINK Link,
-    PTCP_HEADER Header,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress
+    PNET_RECEIVE_CONTEXT ReceiveContext,
+    PTCP_HEADER Header
     );
 
 VOID
@@ -342,11 +330,8 @@ NetpTcpCloseOutSocket (
 VOID
 NetpTcpHandleIncomingConnection (
     PTCP_SOCKET ListeningSocket,
-    PTCP_HEADER Header,
-    PNET_PACKET_BUFFER Packet,
-    PNET_LINK Link,
-    PNETWORK_ADDRESS LocalAddress,
-    PNETWORK_ADDRESS RemoteAddress
+    PNET_RECEIVE_CONTEXT ReceiveContext,
+    PTCP_HEADER Header
     );
 
 VOID
@@ -447,6 +432,7 @@ NET_PROTOCOL_ENTRY NetTcpProtocol = {
     {NULL, NULL},
     NetSocketStream,
     SOCKET_INTERNET_PROTOCOL_TCP,
+    NET_PROTOCOL_FLAG_UNICAST_ONLY | NET_PROTOCOL_FLAG_CONNECTION_BASED,
     NULL,
     NULL,
     {{0}, {0}, {0}},
@@ -702,7 +688,8 @@ NetpTcpCreateSocket (
     PNET_PROTOCOL_ENTRY ProtocolEntry,
     PNET_NETWORK_ENTRY NetworkEntry,
     ULONG NetworkProtocol,
-    PNET_SOCKET *NewSocket
+    PNET_SOCKET *NewSocket,
+    ULONG Phase
     )
 
 /*++
@@ -727,7 +714,13 @@ Arguments:
         socket structure will be returned. The caller is responsible for
         allocating the socket (and potentially a larger structure for its own
         context). The core network library will fill in the standard socket
-        structure after this routine returns.
+        structure after this routine returns. In phase 1, this will contain
+        a pointer to the socket allocated during phase 0.
+
+    Phase - Supplies the socket creation phase. Phase 0 is the allocation phase
+        and phase 1 is the advanced initialization phase, which is invoked
+        after net core is done filling out common portions of the socket
+        structure.
 
 Return Value:
 
@@ -746,6 +739,14 @@ Return Value:
     ASSERT((ProtocolEntry->ParentProtocolNumber ==
             SOCKET_INTERNET_PROTOCOL_TCP) &&
            (NetworkProtocol == ProtocolEntry->ParentProtocolNumber));
+
+    //
+    // TCP only operates in phase 0.
+    //
+
+    if (Phase != 0) {
+        return STATUS_SUCCESS;
+    }
 
     IoState = NULL;
     TcpSocket = MmAllocatePagedPool(sizeof(TCP_SOCKET), TCP_ALLOCATION_TAG);
@@ -785,7 +786,7 @@ Return Value:
         goto TcpCreateSocketEnd;
     }
 
-    IoState = IoCreateIoObjectState(TRUE);
+    IoState = IoCreateIoObjectState(TRUE, FALSE);
     if (IoState == NULL) {
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto TcpCreateSocketEnd;
@@ -852,7 +853,7 @@ TcpCreateSocketEnd:
         }
 
         if (IoState != NULL) {
-            IoDestroyIoObjectState(IoState);
+            IoDestroyIoObjectState(IoState, FALSE);
         }
     }
 
@@ -904,6 +905,10 @@ Return Value:
     ASSERT(LIST_EMPTY(&(TcpSocket->ReceivedSegmentList)) != FALSE);
     ASSERT(LIST_EMPTY(&(TcpSocket->OutgoingSegmentList)) != FALSE);
     ASSERT(TcpSocket->TimerReferenceCount == 0);
+
+    if (Socket->Network->Interface.DestroySocket != NULL) {
+        Socket->Network->Interface.DestroySocket(Socket);
+    }
 
     KeDestroyQueuedLock(TcpSocket->Lock);
     TcpSocket->Lock = NULL;
@@ -958,7 +963,7 @@ Return Value:
     // Pass the request down to the network layer.
     //
 
-    Status = Socket->Network->Interface.BindToAddress(Socket, Link, Address);
+    Status = Socket->Network->Interface.BindToAddress(Socket, Link, Address, 0);
     if (!KSUCCESS(Status)) {
         goto TcpBindToAddressEnd;
     }
@@ -2159,11 +2164,7 @@ TcpSendEnd:
 
 VOID
 NetpTcpProcessReceivedData (
-    PNET_LINK Link,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress,
-    PNET_PROTOCOL_ENTRY ProtocolEntry
+    PNET_RECEIVE_CONTEXT ReceiveContext
     )
 
 /*++
@@ -2174,22 +2175,8 @@ Routine Description:
 
 Arguments:
 
-    Link - Supplies a pointer to the link that received the packet.
-
-    Packet - Supplies a pointer to a structure describing the incoming packet.
-        This structure may be used as a scratch space while this routine
-        executes and the packet travels up the stack, but will not be accessed
-        after this routine returns.
-
-    SourceAddress - Supplies a pointer to the source (remote) address that the
-        packet originated from. This memory will not be referenced once the
-        function returns, it can be stack allocated.
-
-    DestinationAddress - Supplies a pointer to the destination (local) address
-        that the packet is heading to. This memory will not be referenced once
-        the function returns, it can be stack allocated.
-
-    ProtocolEntry - Supplies a pointer to this protocol's protocol entry.
+    ReceiveContext - Supplies a pointer to the receive context that stores the
+        link, packet, network, protocol, and source and destination addresses.
 
 Return Value:
 
@@ -2204,9 +2191,11 @@ Return Value:
     PTCP_HEADER Header;
     ULONG HeaderLength;
     ULONG Length;
+    PNET_PACKET_BUFFER Packet;
     ULONG RelativeAcknowledgeNumber;
     ULONG RelativeSequenceNumber;
     PNET_SOCKET Socket;
+    KSTATUS Status;
     PTCP_SOCKET TcpSocket;
     ULONG WindowSize;
 
@@ -2216,6 +2205,7 @@ Return Value:
     // Validate the packet is at least as long as the header plus its options.
     //
 
+    Packet = ReceiveContext->Packet;
     Length = Packet->FooterOffset - Packet->DataOffset;
     if (Length < sizeof(TCP_HEADER)) {
         RtlDebugPrint("TCP: Skipping packet shorter than length of TCP "
@@ -2253,16 +2243,17 @@ Return Value:
     // before doing any more work.
     //
 
-    SourceAddress->Port = NETWORK_TO_CPU16(Header->SourcePort);
-    DestinationAddress->Port = NETWORK_TO_CPU16(Header->DestinationPort);
-    Socket = NetFindSocket(ProtocolEntry, DestinationAddress, SourceAddress);
-    if (Socket == NULL) {
-        NetpTcpHandleUnconnectedPacket(Link,
-                                       Header,
-                                       Packet,
-                                       SourceAddress,
-                                       DestinationAddress);
+    ReceiveContext->Source->Port = NETWORK_TO_CPU16(Header->SourcePort);
+    ReceiveContext->Destination->Port =
+                                     NETWORK_TO_CPU16(Header->DestinationPort);
 
+    Socket = NULL;
+    Status = NetFindSocket(ReceiveContext, &Socket);
+    if (!KSUCCESS(Status)) {
+
+        ASSERT(Status != STATUS_MORE_PROCESSING_REQUIRED);
+
+        NetpTcpHandleUnconnectedPacket(ReceiveContext, Header);
         return;
     }
 
@@ -2278,15 +2269,15 @@ Return Value:
 
         Checksum = NetpTcpChecksumData(Header,
                                        Length,
-                                       SourceAddress,
-                                       DestinationAddress);
+                                       ReceiveContext->Source,
+                                       ReceiveContext->Destination);
 
         if (Checksum != 0) {
             RtlDebugPrint("TCP ignoring packet with bad checksum 0x%04x headed "
                           "for port %d from port %d.\n",
                           Checksum,
-                          DestinationAddress->Port,
-                          SourceAddress->Port);
+                          ReceiveContext->Destination->Port,
+                          ReceiveContext->Source->Port);
 
             return;
         }
@@ -2349,13 +2340,7 @@ Return Value:
                       Length - HeaderLength);
     }
 
-    NetpTcpProcessPacket(TcpSocket,
-                         Link,
-                         Header,
-                         Packet,
-                         SourceAddress,
-                         DestinationAddress);
-
+    NetpTcpProcessPacket(TcpSocket, ReceiveContext, Header);
     KeReleaseQueuedLock(TcpSocket->Lock);
 
     //
@@ -2368,11 +2353,8 @@ Return Value:
 
 KSTATUS
 NetpTcpProcessReceivedSocketData (
-    PNET_LINK Link,
     PNET_SOCKET Socket,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress
+    PNET_RECEIVE_CONTEXT ReceiveContext
     )
 
 /*++
@@ -2384,22 +2366,10 @@ Routine Description:
 
 Arguments:
 
-    Link - Supplies a pointer to the network link that received the packet.
-
     Socket - Supplies a pointer to the socket that received the packet.
 
-    Packet - Supplies a pointer to a structure describing the incoming packet.
-        Use of this structure depends on its flags. If it is a multicast
-        packet, then it cannot be modified by this routine. Otherwise it can
-        be used as scratch space and modified.
-
-    SourceAddress - Supplies a pointer to the source (remote) address that the
-        packet originated from. This memory will not be referenced once the
-        function returns, it can be stack allocated.
-
-    DestinationAddress - Supplies a pointer to the destination (local) address
-        that the packet is heading to. This memory will not be referenced once
-        the function returns, it can be stack allocated.
+    ReceiveContext - Supplies a pointer to the receive context that stores the
+        link, packet, network, protocol, and source and destination addresses.
 
 Return Value:
 
@@ -2709,6 +2679,16 @@ Return Value:
 
             if (BytesThisRound == SegmentSize) {
                 SegmentOffset = 0;
+
+                //
+                // The next thing to read better be just after this
+                // segment. A failure here indicates bad receive buffering
+                // (e.g. saving duplicate packets into the buffer).
+                //
+
+                ASSERT(ExpectedSequence == Segment->SequenceNumber);
+
+                ExpectedSequence = Segment->NextSequence;
                 if ((Flags & SOCKET_IO_PEEK) == 0) {
                     LIST_REMOVE(&(Segment->Header.ListEntry));
 
@@ -2725,15 +2705,6 @@ Return Value:
                                              TcpSocket->ReceiveWindowTotalSize;
                     }
 
-                    //
-                    // The next thing to read better be just after this
-                    // segment. A failure here indicates bad receive buffering
-                    // (e.g. saving duplicate packets into the buffer).
-                    //
-
-                    ASSERT(ExpectedSequence == Segment->SequenceNumber);
-
-                    ExpectedSequence = Segment->NextSequence;
                     NetpTcpFreeSegment(TcpSocket, &(Segment->Header));
                 }
 
@@ -3549,11 +3520,14 @@ Return Value:
 
 {
 
+    PVOID Buffer;
+    UINTN BufferSize;
     ULONG Integer;
     PTCP_RECEIVED_SEGMENT Segment;
     KSTATUS Status;
     PTCP_SOCKET TcpSocket;
 
+    Status = STATUS_SUCCESS;
     TcpSocket = (PTCP_SOCKET)Socket;
     KeAcquireQueuedLock(TcpSocket->Lock);
     switch (CodeNumber) {
@@ -3563,11 +3537,6 @@ Return Value:
     //
 
     case TcpUserControlAtUrgentMark:
-        if (ContextBufferSize < sizeof(ULONG)) {
-            Status = STATUS_DATA_LENGTH_MISMATCH;
-            break;
-        }
-
         Integer = FALSE;
         if (LIST_EMPTY(&(TcpSocket->ReceivedSegmentList)) == FALSE) {
             Segment = LIST_VALUE(TcpSocket->ReceivedSegmentList.Next,
@@ -3588,14 +3557,21 @@ Return Value:
             }
         }
 
-        if (FromKernelMode != FALSE) {
-            RtlCopyMemory(ContextBuffer, &Integer, sizeof(ULONG));
+        Buffer = &Integer;
+        BufferSize = sizeof(ULONG);
+        break;
 
-        } else {
-            MmCopyToUserMode(ContextBuffer, &Integer, sizeof(ULONG));
+    case TcpUserControlGetInputQueueSize:
+        if (TcpSocket->State == TcpStateListening) {
+            Status = STATUS_INVALID_PARAMETER;
+            break;
         }
 
-        Status = STATUS_SUCCESS;
+        Integer = TcpSocket->ReceiveWindowTotalSize -
+                  TcpSocket->ReceiveWindowFreeSize;
+
+        Buffer = &Integer;
+        BufferSize = sizeof(ULONG);
         break;
 
     default:
@@ -3604,6 +3580,29 @@ Return Value:
     }
 
     KeReleaseQueuedLock(TcpSocket->Lock);
+
+    //
+    // Copy the gathered data on success.
+    //
+
+    if (KSUCCESS(Status)) {
+        if (ContextBufferSize < BufferSize) {
+            Status = STATUS_DATA_LENGTH_MISMATCH;
+            goto UserControlEnd;
+        }
+
+        if (FromKernelMode != FALSE) {
+            RtlCopyMemory(ContextBuffer, Buffer, BufferSize);
+
+        } else {
+            Status = MmCopyToUserMode(ContextBuffer, Buffer, BufferSize);
+            if (!KSUCCESS(Status)) {
+                goto UserControlEnd;
+            }
+        }
+    }
+
+UserControlEnd:
     return Status;
 }
 
@@ -3642,7 +3641,7 @@ Return Value:
     RtlDebugPrint("TCP %I64dms: ", Milliseconds);
     if (Transmit != FALSE) {
         if (NetTcpDebugPrintLocalAddress != FALSE) {
-            NetDebugPrintAddress(&(Socket->NetSocket.LocalAddress));
+            NetDebugPrintAddress(&(Socket->NetSocket.LocalSendAddress));
             RtlDebugPrint(" to ");
         }
     }
@@ -3651,7 +3650,7 @@ Return Value:
     if (Transmit == FALSE) {
         if (NetTcpDebugPrintLocalAddress != FALSE) {
             RtlDebugPrint(" to ");
-            NetDebugPrintAddress(&(Socket->NetSocket.LocalAddress));
+            NetDebugPrintAddress(&(Socket->NetSocket.LocalReceiveAddress));
         }
     }
 
@@ -4029,11 +4028,8 @@ Return Value:
 VOID
 NetpTcpProcessPacket (
     PTCP_SOCKET Socket,
-    PNET_LINK Link,
-    PTCP_HEADER Header,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress
+    PNET_RECEIVE_CONTEXT ReceiveContext,
+    PTCP_HEADER Header
     )
 
 /*++
@@ -4047,19 +4043,10 @@ Arguments:
 
     Socket - Supplies a pointer to the TCP socket.
 
-    Link - Supplies a pointer to the link the packet was received on.
+    ReceiveContext - Supplies a pointer to the receive context that stores the
+        link, packet, network, protocol, and source and destination addresses.
 
     Header - Supplies a pointer to the TCP header.
-
-    Packet - Supplies a pointer to the received packet information.
-
-    SourceAddress - Supplies a pointer to the source (remote) address that the
-        packet originated from. This memory will not be referenced once the
-        function returns, it can be stack allocated.
-
-    DestinationAddress - Supplies a pointer to the destination (local) address
-        that the packet is heading to. This memory will not be referenced once
-        the function returns, it can be stack allocated.
 
 Return Value:
 
@@ -4072,6 +4059,7 @@ Return Value:
     ULONG AcknowledgeNumber;
     ULONGLONG DueTime;
     PIO_OBJECT_STATE IoState;
+    PNET_PACKET_BUFFER Packet;
     ULONG RemoteFinalSequence;
     ULONG RemoteSequence;
     ULONG ResetFlags;
@@ -4084,6 +4072,7 @@ Return Value:
 
     ASSERT(Socket->NetSocket.KernelSocket.ReferenceCount >= 1);
 
+    Packet = ReceiveContext->Packet;
     IoState = Socket->NetSocket.KernelSocket.IoState;
     SynHandled = FALSE;
 
@@ -4097,13 +4086,6 @@ Return Value:
     if (Socket->State == TcpStateInitialized) {
         return;
     }
-
-    //
-    // If the socket is not active, then things like the remote host will have
-    // been cleared and processing should not continue.
-    //
-
-    ASSERT((Socket->NetSocket.Flags & NET_SOCKET_FLAG_ACTIVE) != 0);
 
     RemoteSequence = NETWORK_TO_CPU32(Header->SequenceNumber);
     AcknowledgeNumber = NETWORK_TO_CPU32(Header->AcknowledgmentNumber);
@@ -4165,6 +4147,16 @@ Return Value:
     }
 
     //
+    // The socket should only be inactive in the closed or initialized states.
+    // If it's in any other state, then there is likely a bug in the state
+    // machine. Deactivation should coincide with destroying a socket's list of
+    // received packets. As it would be bad to add a new packet to that list,
+    // assert that the socket is active.
+    //
+
+    ASSERT((Socket->NetSocket.Flags & NET_SOCKET_FLAG_ACTIVE) != 0);
+
+    //
     // Perform special handling for a listening socket.
     //
 
@@ -4196,12 +4188,7 @@ Return Value:
         //
 
         if ((Header->Flags & TCP_HEADER_FLAG_SYN) != 0) {
-            NetpTcpHandleIncomingConnection(Socket,
-                                            Header,
-                                            Packet,
-                                            Link,
-                                            DestinationAddress,
-                                            SourceAddress);
+            NetpTcpHandleIncomingConnection(Socket, ReceiveContext, Header);
         }
 
         return;
@@ -4633,11 +4620,8 @@ Return Value:
 
 VOID
 NetpTcpHandleUnconnectedPacket (
-    PNET_LINK Link,
-    PTCP_HEADER Header,
-    PNET_PACKET_BUFFER Packet,
-    PNETWORK_ADDRESS SourceAddress,
-    PNETWORK_ADDRESS DestinationAddress
+    PNET_RECEIVE_CONTEXT ReceiveContext,
+    PTCP_HEADER Header
     )
 
 /*++
@@ -4649,19 +4633,10 @@ Routine Description:
 
 Arguments:
 
-    Link - Supplies a pointer to the link the packet was received on.
+    ReceiveContext - Supplies a pointer to the receive context that stores the
+        link, packet, network, protocol, and source and destination addresses.
 
     Header - Supplies a pointer to the TCP header.
-
-    Packet - Supplies a pointer to the received packet information.
-
-    SourceAddress - Supplies a pointer to the source (remote) address that the
-        packet originated from. This memory will not be referenced once the
-        function returns, it can be stack allocated.
-
-    DestinationAddress - Supplies a pointer to the destination (local) address
-        that the packet is heading to. This memory will not be referenced once
-        the function returns, it can be stack allocated.
 
 Return Value:
 
@@ -4681,7 +4656,7 @@ Return Value:
     ULONG SegmentLength;
     KSTATUS Status;
 
-    ASSERT(Link != NULL);
+    ASSERT(ReceiveContext->Link != NULL);
 
     LockHeld = FALSE;
 
@@ -4694,10 +4669,10 @@ Return Value:
                        HlQueryTimeCounterFrequency();
 
         RtlDebugPrint("TCP %I64dms: ", Milliseconds);
-        NetDebugPrintAddress(SourceAddress);
+        NetDebugPrintAddress(ReceiveContext->Source);
         if (NetTcpDebugPrintLocalAddress != FALSE) {
             RtlDebugPrint(" to ");
-            NetDebugPrintAddress(DestinationAddress);
+            NetDebugPrintAddress(ReceiveContext->Destination);
         }
     }
 
@@ -4709,8 +4684,8 @@ Return Value:
         if (NetTcpDebugPrintAllPackets != FALSE) {
             RtlDebugPrint(" TCP RST packet from port %d for port %d has no "
                           "socket, ignoring packet.\n",
-                          SourceAddress->Port,
-                          DestinationAddress->Port);
+                          ReceiveContext->Source->Port,
+                          ReceiveContext->Destination->Port);
         }
 
         return;
@@ -4723,8 +4698,8 @@ Return Value:
     if (NetTcpDebugPrintAllPackets != FALSE) {
         RtlDebugPrint(" TCP packet from port %d for port %d has no socket, "
                       "sending reset.\n",
-                      SourceAddress->Port,
-                      DestinationAddress->Port);
+                      ReceiveContext->Source->Port,
+                      ReceiveContext->Destination->Port);
     }
 
     //
@@ -4751,7 +4726,8 @@ Return Value:
 
     } else {
         ResetSequenceNumber = 0;
-        SegmentLength = Packet->FooterOffset - Packet->DataOffset;
+        SegmentLength = ReceiveContext->Packet->FooterOffset -
+                        ReceiveContext->Packet->DataOffset;
 
         //
         // Remember to count SYNs and FINs as part of the data length.
@@ -4773,9 +4749,10 @@ Return Value:
     // Create a socket that will be used to send this transmission.
     //
 
-    ASSERT(SourceAddress->Domain == DestinationAddress->Domain);
+    ASSERT(ReceiveContext->Source->Domain ==
+           ReceiveContext->Destination->Domain);
 
-    Status = IoSocketCreate(DestinationAddress->Domain,
+    Status = IoSocketCreate(ReceiveContext->Destination->Domain,
                             NetSocketStream,
                             SOCKET_INTERNET_PROTOCOL_TCP,
                             0,
@@ -4801,10 +4778,13 @@ Return Value:
     // packet gets dropped without a response.
     //
 
+    ASSERT(NewTcpSocket->NetSocket.Network == ReceiveContext->Network);
+
     Status = NewTcpSocket->NetSocket.Network->Interface.BindToAddress(
-                                                    &(NewTcpSocket->NetSocket),
-                                                    Link,
-                                                    DestinationAddress);
+                                                  &(NewTcpSocket->NetSocket),
+                                                  ReceiveContext->Link,
+                                                  ReceiveContext->Destination,
+                                                  0);
 
     if (!KSUCCESS(Status)) {
         goto TcpHandleUnconnectedPacketEnd;
@@ -4816,7 +4796,7 @@ Return Value:
 
     Status = NewTcpSocket->NetSocket.Network->Interface.Connect(
                                                      (PNET_SOCKET)NewTcpSocket,
-                                                     SourceAddress);
+                                                     ReceiveContext->Source);
 
     if (!KSUCCESS(Status)) {
         goto TcpHandleUnconnectedPacketEnd;
@@ -4908,11 +4888,12 @@ Return Value:
 {
 
     PVOID Buffer;
-    USHORT Checksum;
+    PNETWORK_ADDRESS DestinationAddress;
     PTCP_HEADER Header;
     ULONG PacketSize;
     ULONG RelativeAcknowledgeNumber;
     ULONG RelativeSequenceNumber;
+    PNETWORK_ADDRESS SourceAddress;
     ULONG WindowSize;
 
     //
@@ -4927,10 +4908,10 @@ Return Value:
 
     Buffer = Packet->Buffer + Packet->DataOffset;
     Header = (PTCP_HEADER)Buffer;
-    Header->SourcePort = CPU_TO_NETWORK16(Socket->NetSocket.LocalAddress.Port);
-    Header->DestinationPort =
-                        CPU_TO_NETWORK16(Socket->NetSocket.RemoteAddress.Port);
-
+    SourceAddress = &(Socket->NetSocket.LocalSendAddress);
+    DestinationAddress = &(Socket->NetSocket.RemoteAddress);
+    Header->SourcePort = CPU_TO_NETWORK16(SourceAddress->Port);
+    Header->DestinationPort = CPU_TO_NETWORK16(DestinationAddress->Port);
     Header->SequenceNumber = CPU_TO_NETWORK32(SequenceNumber);
     Header->HeaderLength = ((sizeof(TCP_HEADER) + OptionsLength) >> 2) <<
                            TCP_HEADER_LENGTH_SHIFT;
@@ -4954,15 +4935,13 @@ Return Value:
     Header->NonUrgentOffset = NonUrgentOffset;
     Header->Checksum = 0;
     PacketSize = sizeof(TCP_HEADER) + OptionsLength + DataLength;
-    if ((Socket->NetSocket.Link->Properties.ChecksumFlags &
-         NET_LINK_CHECKSUM_FLAG_TRANSMIT_TCP_OFFLOAD) == 0) {
+    if ((Socket->NetSocket.Link->Properties.Capabilities &
+         NET_LINK_CAPABILITY_TRANSMIT_TCP_CHECKSUM_OFFLOAD) == 0) {
 
-        Checksum = NetpTcpChecksumData(Header,
-                                       PacketSize,
-                                       &(Socket->NetSocket.LocalAddress),
-                                       &(Socket->NetSocket.RemoteAddress));
-
-        Header->Checksum = Checksum;
+        Header->Checksum = NetpTcpChecksumData(Header,
+                                               PacketSize,
+                                               SourceAddress,
+                                               DestinationAddress);
 
     } else {
         Packet->Flags |= NET_PACKET_FLAG_TCP_CHECKSUM_OFFLOAD;
@@ -7730,11 +7709,8 @@ Return Value:
 VOID
 NetpTcpHandleIncomingConnection (
     PTCP_SOCKET ListeningSocket,
-    PTCP_HEADER Header,
-    PNET_PACKET_BUFFER Packet,
-    PNET_LINK Link,
-    PNETWORK_ADDRESS LocalAddress,
-    PNETWORK_ADDRESS RemoteAddress
+    PNET_RECEIVE_CONTEXT ReceiveContext,
+    PTCP_HEADER Header
     )
 
 /*++
@@ -7750,18 +7726,11 @@ Arguments:
     ListeningSocket - Supplies a pointer to the original listening socket that
         just saw an incoming connection request.
 
+    ReceiveContext - Supplies a pointer to the receive context that stores the
+        link, packet, network, protocol, and source and destination addresses
+        for the connection request.
+
     Header - Supplies a pointer to the valid TCP header containing the SYN.
-
-    Packet - Supplies a pointer to the packet body, used to parse any options
-        in the header.
-
-    Link - Supplies a pointer to the link this connection was received on.
-
-    LocalAddress - Supplies a pointer to the local address this connection was
-        received on.
-
-    RemoteAddress - Supplies a pointer to the remote address making the
-        connection request.
 
 Return Value:
 
@@ -7773,11 +7742,13 @@ Return Value:
 
     PTCP_INCOMING_CONNECTION IncomingConnection;
     PIO_OBJECT_STATE IoState;
+    PNETWORK_ADDRESS LocalAddress;
     BOOL LockHeld;
     ULONG NetSocketFlags;
     ULONG NetworkProtocol;
     PIO_HANDLE NewIoHandle;
     PTCP_SOCKET NewTcpSocket;
+    PNETWORK_ADDRESS RemoteAddress;
     ULONG RemoteSequence;
     ULONG ResetFlags;
     ULONG ResetSequenceNumber;
@@ -7786,6 +7757,8 @@ Return Value:
     LockHeld = FALSE;
     NewIoHandle = NULL;
     NewTcpSocket = NULL;
+    LocalAddress = ReceiveContext->Destination;
+    RemoteAddress = ReceiveContext->Source;
     IncomingConnection = MmAllocatePagedPool(sizeof(TCP_INCOMING_CONNECTION),
                                              TCP_ALLOCATION_TAG);
 
@@ -7840,8 +7813,9 @@ Return Value:
 
     Status = NewTcpSocket->NetSocket.Network->Interface.BindToAddress(
                                                     &(NewTcpSocket->NetSocket),
-                                                    Link,
-                                                    LocalAddress);
+                                                    ReceiveContext->Link,
+                                                    LocalAddress,
+                                                    0);
 
     if (!KSUCCESS(Status)) {
         goto TcpHandleIncomingConnectionEnd;
@@ -7852,8 +7826,8 @@ Return Value:
     //
 
     Status = NewTcpSocket->NetSocket.Network->Interface.Connect(
-                                                     (PNET_SOCKET)NewTcpSocket,
-                                                     RemoteAddress);
+                                                    &(NewTcpSocket->NetSocket),
+                                                    RemoteAddress);
 
     if (!KSUCCESS(Status)) {
         goto TcpHandleIncomingConnectionEnd;
@@ -7889,11 +7863,25 @@ Return Value:
     NewTcpSocket->LingerTimeout = ListeningSocket->LingerTimeout;
 
     //
+    // Copy any network specific socket options.
+    //
+
+    if (NewTcpSocket->NetSocket.Network->Interface.CopyInformation != NULL) {
+        Status = NewTcpSocket->NetSocket.Network->Interface.CopyInformation(
+                                                &(NewTcpSocket->NetSocket),
+                                                &(ListeningSocket->NetSocket));
+
+        if (!KSUCCESS(Status)) {
+            goto TcpHandleIncomingConnectionEnd;
+        }
+    }
+
+    //
     // Re-parse any options coming from the SYN packet and set up the sequence
     // numbers.
     //
 
-    NetpTcpProcessPacketOptions(NewTcpSocket, Header, Packet);
+    NetpTcpProcessPacketOptions(NewTcpSocket, Header, ReceiveContext->Packet);
     RemoteSequence = NETWORK_TO_CPU32(Header->SequenceNumber);
     NewTcpSocket->ReceiveInitialSequence = RemoteSequence;
     NewTcpSocket->ReceiveNextSequence = RemoteSequence + 1;

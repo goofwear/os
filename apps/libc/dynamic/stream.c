@@ -114,7 +114,7 @@ ClpDestroyFileStructure (
 
 BOOL
 ClpFileFormatWriteCharacter (
-    CHAR Character,
+    INT Character,
     PPRINT_FORMAT_CONTEXT Context
     );
 
@@ -429,6 +429,10 @@ freopenEnd:
     Stream->BufferNextIndex = 0;
     Stream->BufferValidSize = 0;
     Stream->Flags &= (FILE_FLAG_BUFFER_ALLOCATED | FILE_FLAG_STANDARD_IO);
+    if ((OpenFlags & O_ACCMODE) != O_WRONLY) {
+        Stream->Flags |= FILE_FLAG_CAN_READ;
+    }
+
     ClpUnlockStream(Stream);
     return Stream;
 }
@@ -606,23 +610,29 @@ Return Value:
 
     if (Stream->BufferMode == _IONBF) {
         ClpFlushAllStreams(FALSE, Stream);
-        do {
-            Result = read(Stream->Descriptor,
-                          Buffer + TotalBytesRead,
-                          TotalBytesToRead - TotalBytesRead);
+        while (TotalBytesRead != TotalBytesToRead) {
+            do {
+                Result = read(Stream->Descriptor,
+                              Buffer + TotalBytesRead,
+                              TotalBytesToRead - TotalBytesRead);
 
-        } while ((Result < 0) && (errno == EINTR));
+            } while ((Result < 0) && (errno == EINTR));
 
-        if (Result == 0) {
-            Stream->Flags |= FILE_FLAG_END_OF_FILE;
+            if (Result <= 0) {
+                if (Result < 0) {
+                    Stream->Flags |= FILE_FLAG_ERROR;
+
+                } else {
+                    Stream->Flags |= FILE_FLAG_END_OF_FILE;
+                }
+
+                break;
+            }
+
+            TotalBytesRead += Result;
         }
 
-        if (Result == -1) {
-            Stream->Flags |= FILE_FLAG_ERROR;
-            Result = 0;
-        }
-
-        return Result / Size;
+        return TotalBytesRead / Size;
     }
 
     assert(Stream->Buffer != NULL);
@@ -3092,7 +3102,7 @@ Return Value:
     StreamContext.CharactersWritten = 0;
     memset(&PrintContext, 0, sizeof(PRINT_FORMAT_CONTEXT));
     PrintContext.Context = &StreamContext;
-    PrintContext.U.WriteCharacter = ClpFileFormatWriteCharacter;
+    PrintContext.WriteCharacter = ClpFileFormatWriteCharacter;
     RtlInitializeMultibyteState(&(PrintContext.State),
                                 CharacterEncodingDefault);
 
@@ -3570,7 +3580,7 @@ Return Value:
 
 BOOL
 ClpFileFormatWriteCharacter (
-    CHAR Character,
+    INT Character,
     PPRINT_FORMAT_CONTEXT Context
     )
 

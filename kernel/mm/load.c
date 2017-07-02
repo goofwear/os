@@ -368,11 +368,14 @@ Return Value:
     BOOL AccountantLockHeld;
     PKPROCESS OwningProcess;
     UINTN PageSize;
+    PIMAGE_SECTION Section;
+    UINTN SectionOffset;
     KSTATUS Status;
     ULONG UnmapFlags;
 
     ASSERT(KeGetRunLevel() == RunLevelLow);
 
+    AccountantLockHeld = FALSE;
     PageSize = MmPageSize();
 
     //
@@ -383,14 +386,35 @@ Return Value:
 
     Size = ALIGN_RANGE_UP(Size, PageSize);
 
-    ASSERT(FileMapping + Size > FileMapping);
+    ASSERT(FileMapping + Size >= FileMapping);
 
     OwningProcess = Process;
     if (OwningProcess == NULL) {
         OwningProcess = PsGetCurrentProcess();
     }
 
-    AccountantLockHeld = FALSE;
+    //
+    // If no size was supplied, look up the image section to get it, and unmap
+    // to the end of the region.
+    //
+
+    if (Size == 0) {
+        Status = MmpLookupSection(FileMapping,
+                                  OwningProcess->AddressSpace,
+                                  &Section,
+                                  &SectionOffset);
+
+        if (!KSUCCESS(Status)) {
+            goto UnmapFileSectionEnd;
+        }
+
+        Size = Section->VirtualAddress + Section->Size - FileMapping;
+        MmpImageSectionReleaseReference(Section);
+        if (Size == 0) {
+            goto UnmapFileSectionEnd;
+        }
+    }
+
     Accountant = OwningProcess->AddressSpace->Accountant;
     if (FileMapping > KERNEL_VA_START) {
         OwningProcess = PsGetKernelProcess();
@@ -484,6 +508,7 @@ Return Value:
     ULONG AccessPermissions;
     PKPROCESS CurrentProcess;
     IO_OFFSET FileOffset;
+    FILE_PROPERTIES FileProperties;
     PIO_HANDLE IoHandle;
     ULONG MapFlags;
     ULONG OpenFlags;
@@ -515,7 +540,7 @@ Return Value:
 
     if ((IS_ALIGNED((UINTN)Parameters->Address, PageSize) == FALSE) ||
         ((Parameters->Address + Parameters->Size) >= KERNEL_VA_START) ||
-        ((Parameters->Address + Parameters->Size) <= Parameters->Address)) {
+        ((Parameters->Address + Parameters->Size) < Parameters->Address)) {
 
         Status = STATUS_INVALID_PARAMETER;
         goto SysMapOrUnmapMemoryEnd;
@@ -545,7 +570,7 @@ Return Value:
         // The offset and size must not overflow.
         //
 
-        if (Parameters->Offset + Parameters->Size <= Parameters->Offset) {
+        if (Parameters->Offset + Parameters->Size < Parameters->Offset) {
             Status = STATUS_INVALID_PARAMETER;
             goto SysMapOrUnmapMemoryEnd;
         }
@@ -570,19 +595,28 @@ Return Value:
                 goto SysMapOrUnmapMemoryEnd;
             }
 
-            //
-            // The I/O handle must be cacheable to support mapping shared image
-            // sections.
-            //
-
-            if (((MapFlags & SYS_MAP_FLAG_SHARED) != 0) &&
-                (IoIoHandleIsCacheable(IoHandle) == FALSE)) {
-
-                Status = STATUS_NO_ELIGIBLE_DEVICES;
-                goto SysMapOrUnmapMemoryEnd;
-            }
-
             FileOffset = Parameters->Offset;
+
+            //
+            // If no size was supplied, try to map the whole thing.
+            //
+
+            if ((Parameters->Size == 0) &&
+                ((MapFlags & SYS_MAP_FLAG_ANONYMOUS) == 0)) {
+
+                Status = IoGetFileInformation(IoHandle, &FileProperties);
+                if (!KSUCCESS(Status)) {
+                    goto SysMapOrUnmapMemoryEnd;
+                }
+
+                Parameters->Size = FileProperties.Size;
+                if (Parameters->Offset + Parameters->Size <=
+                    Parameters->Offset) {
+
+                    Status = STATUS_INVALID_PARAMETER;
+                    goto SysMapOrUnmapMemoryEnd;
+                }
+            }
 
         //
         // Shared anonymous sections are backed by an un-named shared memory
@@ -590,6 +624,11 @@ Return Value:
         //
 
         } else if ((MapFlags & SYS_MAP_FLAG_SHARED) != 0) {
+            if (Parameters->Size == 0) {
+                Status = STATUS_INVALID_PARAMETER;
+                goto SysMapOrUnmapMemoryEnd;
+            }
+
             AccessPermissions = 0;
             if ((MapFlags & SYS_MAP_FLAG_READ) != 0) {
                 AccessPermissions |= IO_ACCESS_READ;
@@ -627,9 +666,8 @@ Return Value:
             //
 
             Request.FieldsToSet = FILE_PROPERTY_FIELD_FILE_SIZE;
-            WRITE_INT64_SYNC(&(Request.FileProperties.FileSize),
-                             Parameters->Size);
-
+            Request.FileProperties = &FileProperties;
+            FileProperties.Size = Parameters->Size;
             Status = IoSetFileInformation(FALSE, IoHandle, &Request);
             if (!KSUCCESS(Status)) {
                 goto SysMapOrUnmapMemoryEnd;
@@ -972,12 +1010,12 @@ Return Value:
         TotalSyncSize += OverlapSize;
 
         //
-        // If the image section is not cache-backed, shared, and writable, then
+        // If the image section is not backed, shared, and writable, then
         // there is nothing to synchronize.
         //
 
         if (((CurrentSection->Flags & IMAGE_SECTION_SHARED) == 0) ||
-            ((CurrentSection->Flags & IMAGE_SECTION_PAGE_CACHE_BACKED) == 0) ||
+            ((CurrentSection->Flags & IMAGE_SECTION_BACKED) == 0) ||
             ((CurrentSection->Flags & IMAGE_SECTION_WAS_WRITABLE) == 0)) {
 
             CurrentEntry = CurrentEntry->Next;

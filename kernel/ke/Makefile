@@ -29,15 +29,15 @@
 
 BINARY = ke.a
 
-BINARYTYPE = library
+BINARYTYPE = klibrary
 
 ##
 ## Define the kernel version.
 ##
 
 VERSION_MAJOR := 0
-VERSION_MINOR := 3
-VERSION_REVISION := 1
+VERSION_MINOR := 4
+VERSION_REVISION := 0
 VERSION_RELEASE := SystemReleaseDevelopment
 
 OBJS = crash.o    \
@@ -56,7 +56,6 @@ OBJS = crash.o    \
        sysclock.o \
        sysres.o   \
        timer.o    \
-       timezone.o \
        version.o  \
        video.o    \
        workitem.o \
@@ -65,6 +64,14 @@ X86_OBJS = x86/archinit.o \
            x86/ctxswap.o  \
            x86/ctxswapc.o \
            x86/dispatch.o \
+           x86/pcexcept.o \
+           x86/proc.o     \
+
+X64_OBJS = x64/ctxswap.o  \
+           x64/ctxswapc.o \
+           x64/dispatch.o \
+           x86/archinit.o \
+           x86/pcexcept.o \
            x86/proc.o     \
 
 ARMV7_OBJS = armv7/archinit.o \
@@ -79,7 +86,7 @@ ARMV6_OBJS = armv7/archinit.o \
              armv7/dispatch.o \
              armv7/proc.o     \
 
-EXTRA_SRC_DIRS = x86 armv7 armv6
+EXTRA_SRC_DIRS = x86 x64 armv7 armv6
 
 INCLUDES += .;
 

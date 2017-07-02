@@ -65,17 +65,15 @@ X64_OBJS = x64/osbasea.o \
            x64/syscall.o \
 
 EXTRA_LDFLAGS += -Wl,-Bsymbolic
-EXTRA_LDFLAGS += -nodefaultlibs -nostartfiles -nostdlib -Wl,--whole-archive
+EXTRA_LDFLAGS += -nostdlib -Wl,--whole-archive
 
 EXTRA_SRC_DIRS = x86 x64 armv7
 
 TARGETLIBS = $(OBJROOT)/os/lib/rtl/base/basertl.a        \
              $(OBJROOT)/os/lib/rtl/base/wide/basertlw.a  \
-             $(OBJROOT)/os/lib/im/im.a                   \
-             $(OBJROOT)/os/apps/osbase/urtl/urtl.a       \
+             $(OBJROOT)/os/lib/rtl/urtl/urtl.a           \
+             $(OBJROOT)/os/lib/im/native/imn.a           \
              $(OBJROOT)/os/lib/crypto/crypto.a           \
-
-DIRS = urtl    \
 
 include $(SRCROOT)/os/minoca.mk
 

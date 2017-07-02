@@ -38,16 +38,11 @@ include $(SRCDIR)/../sources
 
 OBJS += $(POSIX_OBJS)
 
-##
-## TODO: Figure this out, as this isn't right. Maybe create a new driver target
-## so it's not necessary to override DriverEntry?
-##
-
-ENTRY := 0
-
 TARGETLIBS = $(OBJROOT)/os/lib/yy/yy.a                     \
-             $(OBJROOT)/os/lib/rtl/base/basertl.a          \
-             $(OBJROOT)/os/lib/rtl/rtlc/rtlc.a             \
 
 include $(SRCROOT)/os/minoca.mk
+
+postbuild:
+	@mkdir -p $(BINROOT)/apps/usr/lib
+	@$(STRIP) -p -o $(BINROOT)/apps/usr/lib/$(BINARY) $(BINROOT)/$(BINARY)
 

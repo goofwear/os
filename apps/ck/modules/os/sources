@@ -26,9 +26,12 @@
 ################################################################################
 
 OBJS = entry.o        \
+       errno.o        \
+       io.o           \
        os.o           \
+       osinfo.o       \
 
 WIN32_OBJS = oswin32.o \
 
-POSIX_OBJS = osposix.o \
+POSIX_OBJS =
 

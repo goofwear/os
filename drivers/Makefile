@@ -33,7 +33,7 @@ DIRS = acpi      \
        dma       \
        fat       \
        gpio      \
-       i8042     \
+       input     \
        net       \
        null      \
        part      \
@@ -42,16 +42,16 @@ DIRS = acpi      \
        ramdisk   \
        sd        \
        spb       \
+       sound     \
        special   \
        term      \
        usb       \
-       usrinput  \
        videocon  \
 
 include $(SRCROOT)/os/minoca.mk
 
-i8042 usb: usrinput
+usb: input
 ata usb: part
 net: usb
-plat: usrinput spb
+plat: input spb
 

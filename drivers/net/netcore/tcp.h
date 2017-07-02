@@ -354,6 +354,7 @@ Author:
 
 typedef enum _TCP_USER_CONTROL_CODE {
     TcpUserControlAtUrgentMark = 0x7300,
+    TcpUserControlGetInputQueueSize = 0x741B,
 } TCP_USER_CONTROL_CODE, *PTCP_USER_CONTROL_CODE;
 
 //
@@ -520,7 +521,7 @@ Members:
     Lock - Store a pointer to a queued lock used to synchronize access to
         various parts of the structure.
 
-    ReceivedSegmentList - Stores the head of the list of recieved segments that
+    ReceivedSegmentList - Stores the head of the list of received segments that
         have not yet been read by the user. This list contains objects of type
         TCP_RECEIVED_SEGMENT, and is in order by sequence number.
 
@@ -1036,7 +1037,7 @@ NetpTcpTransmissionTimeout (
 
 Routine Description:
 
-    This routine is called when an acknowledge is not recieved for a sent
+    This routine is called when an acknowledge is not received for a sent
     packet in a timely manner (the packet timed out).
 
 Arguments:

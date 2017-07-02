@@ -29,7 +29,7 @@ Environment:
 ## ---------------------------------------------------------------- Definitions
 ##
 
-#if defined(__WINNT) || defined(__APPLE__)
+#if defined(__WINNT) || defined(__CYGWIN__) || defined(__APPLE__)
 
 #define LABEL(_Name) _##_Name
 
@@ -40,6 +40,7 @@ Environment:
 #endif
 
 #define INCLUDE_BINARY(_Path, _Name) \
+    .align 4; \
     .global LABEL(_Name##_start); \
     LABEL(_Name##_start):; \
     .incbin _Path; \

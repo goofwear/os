@@ -261,7 +261,7 @@ Author:
 // given file or device will bypass the page cache for all I/O operations.
 //
 
-#define OPEN_FLAG_NON_CACHED 0x20000000
+#define OPEN_FLAG_NO_PAGE_CACHE 0x20000000
 
 //
 // This flag is reserved for use only by the I/O manager. It indicates that the
@@ -856,11 +856,18 @@ Author:
 #define DIRECTORY_CONTENTS_OFFSET 2
 
 //
-// Set this flag in lookup if the device's data should not be cached. It is
-// intended for use with block devices.
+// Set this flag in lookup if the device's data should not be stored in the
+// page cache.
 //
 
-#define LOOKUP_FLAG_NON_CACHED 0x00000001
+#define LOOKUP_FLAG_NO_PAGE_CACHE 0x00000001
+
+//
+// Set this flag if the file's I/O state should be allocated from non-paged
+// pool. This is useful if the I/O state needs to be signaled from a DPC.
+//
+
+#define LOOKUP_FLAG_NON_PAGED_IO_STATE 0x00000002
 
 //
 // Define the version number for the I/O cache statistics.
@@ -922,6 +929,19 @@ Author:
 //
 
 #define LOADED_FILE_VERSION 1
+
+//
+// Define shared memory properties, stored in the permissions field of the
+// permissions structure.
+//
+
+//
+// Set this flag if the shared memory object is unlinked and will be destroyed
+// when the last reference is closed. This lines up with SHM_DEST in the C
+// library.
+//
+
+#define SHARED_MEMORY_PROPERTY_UNLINKED 0x00010000
 
 //
 // ------------------------------------------------------ Data Type Definitions
@@ -1032,6 +1052,13 @@ typedef enum _IO_INFORMATION_TYPE {
     IoInformationMountPoints,
     IoInformationCacheStatistics,
 } IO_INFORMATION_TYPE, *PIO_INFORMATION_TYPE;
+
+typedef enum _SHARED_MEMORY_COMMAND {
+    SharedMemoryCommandInvalid,
+    SharedMemoryCommandUnlink,
+    SharedMemoryCommandSet,
+    SharedMemoryCommandStat
+} SHARED_MEMORY_COMMAND, *PSHARED_MEMORY_COMMAND;
 
 /*++
 
@@ -1544,19 +1571,18 @@ Members:
 
     Type - Stores the type of file (regular file, directory, etc).
 
-    UserId - Stores the user ID of the file owner.
-
-    GroupId - Stores the group ID of the file owner.
-
     Permissions - Stores the file permissions.
 
     HardLinkCount - Stores the number of hard links that exist for this file.
 
-    FileSize - Stores the total file size of this file.
+    UserId - Stores the user ID of the file owner.
 
-    BlockSize - Stores the size of a block on this file system.
+    GroupId - Stores the group ID of the file owner.
 
-    BlockCount - Stores the number of blocks allocated for this file.
+    RelatedDevice - Stores the device ID of the related device for certain
+        special device types.
+
+    Size - Stores the size of this file entity, in bytes.
 
     AccessTime - Stores the last time this file was accessed.
 
@@ -1568,22 +1594,36 @@ Members:
         This includes a change in the file's ownership, permissions, or
         hard link count.
 
+    CreationTime - Stores the file creation time.
+
+    BlockSize - Stores the size of a block on this file system.
+
+    BlockCount - Stores the number of blocks allocated for this file.
+
+    Flags - Stores user defined flags.
+
+    Generation - Stores the file generation number.
+
 --*/
 
 typedef struct _FILE_PROPERTIES {
     DEVICE_ID DeviceId;
     FILE_ID FileId;
     IO_OBJECT_TYPE Type;
+    FILE_PERMISSIONS Permissions;
+    LONG HardLinkCount;
     USER_ID UserId;
     GROUP_ID GroupId;
-    FILE_PERMISSIONS Permissions;
-    ULONG HardLinkCount;
-    INT64_SYNC FileSize;
-    ULONG BlockSize;
-    ULONGLONG BlockCount;
+    DEVICE_ID RelatedDevice;
+    IO_OFFSET Size;
     SYSTEM_TIME AccessTime;
     SYSTEM_TIME ModifiedTime;
     SYSTEM_TIME StatusChangeTime;
+    SYSTEM_TIME CreationTime;
+    IO_OFFSET BlockSize;
+    IO_OFFSET BlockCount;
+    ULONG Flags;
+    ULONG Generation;
 } FILE_PROPERTIES, *PFILE_PROPERTIES;
 
 /*++
@@ -1598,14 +1638,13 @@ Members:
         FILE_PROPERY_FIELD_* definitions. If this value is zero, then all the
         fields will be retrieved rather than any being set.
 
-    FileProperties - Stores the file properties returned by the kernel on
-        success.
+    FileProperties - Stores a pointer to the file properties to get or set.
 
 --*/
 
 typedef struct _SET_FILE_INFORMATION {
     ULONG FieldsToSet;
-    FILE_PROPERTIES FileProperties;
+    PFILE_PROPERTIES FileProperties;
 } SET_FILE_INFORMATION, *PSET_FILE_INFORMATION;
 
 /*++
@@ -2033,6 +2072,10 @@ Members:
         the driver must not access the user buffer directly, but instead use
         MM copy routines to copy to and from user mode.
 
+    DeviceContext - Stores a pointer to the device context supplied by the
+        device driver upon opening the device. This is used to uniquely
+        identify the open file.
+
     UserBuffer - Supplies a pointer to the buffer containing the context for
         the user control IRP. This will be a user mode pointer and must be
         treated with caution.
@@ -2044,6 +2087,7 @@ Members:
 
 typedef struct _IRP_USER_CONTROL {
     BOOL FromKernelMode;
+    PVOID DeviceContext;
     PVOID UserBuffer;
     UINTN UserBufferSize;
 } IRP_USER_CONTROL, *PIRP_USER_CONTROL;
@@ -2169,8 +2213,12 @@ Members:
     Flags - Stores a bitmask of flags returned by lookup. See LOOKUP_FLAGS_*
         for definitions.
 
-    Directory - Stores a pointer to the properties of the directory file that
-        is to be searched.
+    MapFlags - Supplies a bitmask of additional map flags to apply when mapping
+        physical addresses returned from doing I/O on this file object. See
+        MAP_FLAG_* definitions.
+
+    DirectoryProperties - Stores a pointer to the properties of the directory
+        file that is to be searched.
 
     FileName - Stores a pointer to the name of the file, which may not be
         null terminated.
@@ -2179,17 +2227,19 @@ Members:
         for a null terminator (which may be a null terminator or may be a
         garbage character).
 
-    Properties - Stores the file properties if the file was found.
+    Properties - Stores a pointer where the file properties are returned by the
+        driver upon success.
 
 --*/
 
 typedef struct _SYSTEM_CONTROL_LOOKUP {
     BOOL Root;
     ULONG Flags;
+    ULONG MapFlags;
     PFILE_PROPERTIES DirectoryProperties;
     PCSTR FileName;
     ULONG FileNameSize;
-    FILE_PROPERTIES Properties;
+    PFILE_PROPERTIES Properties;
 } SYSTEM_CONTROL_LOOKUP, *PSYSTEM_CONTROL_LOOKUP;
 
 /*++
@@ -2548,8 +2598,8 @@ Members:
 
 typedef struct _MOUNT_POINT_ENTRY {
     ULONG Flags;
-    ULONG MountPointPathOffset;
-    ULONG TargetPathOffset;
+    UINTN MountPointPathOffset;
+    UINTN TargetPathOffset;
 } MOUNT_POINT_ENTRY, *PMOUNT_POINT_ENTRY;
 
 /*++
@@ -2725,6 +2775,74 @@ Return Value:
     None.
 
 --*/
+
+/*++
+
+Structure Description:
+
+    This structure defines the permission set for a shared memory object. This
+    lines up with struct ipc_perm in the C library.
+
+Members:
+
+    OwnerUserId - Stores the user ID of the owner.
+
+    OwnerGroupId - Stores the group ID of the owner.
+
+    CreatorUserId - Stores the user ID of the creator.
+
+    CreatorGroupId - Stores the group ID of the creator.
+
+    Permissions - Stores the permission set for this object.
+
+--*/
+
+typedef struct _SHARED_MEMORY_PERMISSIONS {
+    USER_ID OwnerUserId;
+    GROUP_ID OwnerGroupId;
+    USER_ID CreatorUserId;
+    GROUP_ID CreatorGroupId;
+    ULONG Permissions;
+} SHARED_MEMORY_PERMISSIONS, *PSHARED_MEMORY_PERMISSIONS;
+
+/*++
+
+Structure Description:
+
+    This structure defines the properties of a shared memory object. This
+    structure lines up with struct shmid_ds in the C library.
+
+Members:
+
+    Permissions - Stores the permissions information for the object.
+
+    Size - Stores the size of the shared memory object in bytes.
+
+    AttachTime - Stores the last time an attach occurred.
+
+    DetachTime - Stores the last time a detach occurred.
+
+    ChangeTime - Stores the last time the object was changed (via a set).
+
+    CreatorPid - Stores the process ID of the process that created this object.
+
+    LastPid - Stores the process ID of the last process to operate on this
+        object.
+
+    AttachCount - Stores the number of active attachments.
+
+--*/
+
+typedef struct _SHARED_MEMORY_PROPERTIES {
+    SHARED_MEMORY_PERMISSIONS Permissions;
+    IO_OFFSET Size;
+    SYSTEM_TIME AttachTime;
+    SYSTEM_TIME DetachTime;
+    SYSTEM_TIME ChangeTime;
+    PROCESS_ID CreatorPid;
+    PROCESS_ID LastPid;
+    UINTN AttachCount;
+} SHARED_MEMORY_PROPERTIES, *PSHARED_MEMORY_PROPERTIES;
 
 //
 // -------------------------------------------------------------------- Globals
@@ -6401,7 +6519,8 @@ IoGetIoHandleAccessPermissions (
 
 Routine Description:
 
-    This routine returns the access permissions for the given I/O handle.
+    This routine returns the access permissions for the given I/O handle. For
+    directories, no access is always returned.
 
 Arguments:
 
@@ -6438,7 +6557,8 @@ Return Value:
 
 BOOL
 IoIoHandleIsCacheable (
-    PIO_HANDLE IoHandle
+    PIO_HANDLE IoHandle,
+    PULONG MapFlags
     );
 
 /*++
@@ -6452,9 +6572,14 @@ Arguments:
 
     IoHandle - Supplies a pointer to an I/O handle.
 
+    MapFlags - Supplies an optional pointer where any additional map flags
+        needed when mapping sections from this handle will be returned.
+        See MAP_FLAG_* definitions.
+
 Return Value:
 
-    Returns TRUE if the I/O handle's object is cached or FALSE otherwise.
+    Returns TRUE if the I/O handle's object uses the page cache, FALSE
+    otherwise.
 
 --*/
 
@@ -6574,6 +6699,32 @@ Return Value:
 --*/
 
 KSTATUS
+IoNotifyFileMapping (
+    PIO_HANDLE Handle,
+    BOOL Mapping
+    );
+
+/*++
+
+Routine Description:
+
+    This routine is called to notify a file object that it is being mapped
+    into memory or unmapped.
+
+Arguments:
+
+    Handle - Supplies the handle being mapped.
+
+    Mapping - Supplies a boolean indicating if a new mapping is being created
+        (TRUE) or an old mapping is being destroyed (FALSE).
+
+Return Value:
+
+    Status code.
+
+--*/
+
+KSTATUS
 IoPathAppend (
     PCSTR Prefix,
     ULONG PrefixSize,
@@ -6679,6 +6830,47 @@ Arguments:
 Return Value:
 
     None.
+
+--*/
+
+KSTATUS
+IoGetCurrentDirectory (
+    BOOL FromKernelMode,
+    BOOL Root,
+    PSTR *Path,
+    PUINTN PathSize
+    );
+
+/*++
+
+Routine Description:
+
+    This routine gets either the current working directory or the path of the
+    current chroot environment.
+
+Arguments:
+
+    FromKernelMode - Supplies a boolean indicating whether or not a kernel mode
+        caller is requesting the directory information. This dictates how the
+        given path buffer is treated.
+
+    Root - Supplies a boolean indicating whether to get the path to the current
+        working directory (FALSE) or to get the path of the current chroot
+        environment (TRUE). If the caller does not have permission to escape a
+        changed root, or the root has not been changed, then / is returned in
+        the path argument.
+
+    Path - Supplies a pointer to a buffer that will contain the desired path on
+        output. If the call is from kernel mode and the pointer is NULL, then
+        a buffer will be allocated.
+
+    PathSize - Supplies a pointer to the size of the path buffer on input. On
+        output it stores the required size of the path buffer. This includes
+        the null terminator.
+
+Return Value:
+
+    Status code.
 
 --*/
 
@@ -7424,7 +7616,8 @@ Return Value:
 
 PHYSICAL_ADDRESS
 IoGetPageCacheEntryPhysicalAddress (
-    PPAGE_CACHE_ENTRY Entry
+    PPAGE_CACHE_ENTRY Entry,
+    PULONG MapFlags
     );
 
 /*++
@@ -7436,6 +7629,9 @@ Routine Description:
 Arguments:
 
     Entry - Supplies a pointer to a page cache entry.
+
+    MapFlags - Supplies an optional pointer to the additional mapping flags
+        mandated by the underlying file object.
 
 Return Value:
 
@@ -7634,7 +7830,8 @@ Return Value:
 KERNEL_API
 PIO_OBJECT_STATE
 IoCreateIoObjectState (
-    BOOL HighPriority
+    BOOL HighPriority,
+    BOOL NonPaged
     );
 
 /*++
@@ -7649,6 +7846,10 @@ Arguments:
     HighPriority - Supplies a boolean indicating whether or not the I/O object
         state should be prepared for high priority events.
 
+    NonPaged - Supplies a boolean indicating whether or not the I/O object
+        state should be allocated from non-paged pool. Default is paged pool
+        (FALSE).
+
 Return Value:
 
     Returns a pointer to the new state structure on success.
@@ -7660,7 +7861,8 @@ Return Value:
 KERNEL_API
 VOID
 IoDestroyIoObjectState (
-    PIO_OBJECT_STATE State
+    PIO_OBJECT_STATE State,
+    BOOL NonPaged
     );
 
 /*++
@@ -7672,6 +7874,9 @@ Routine Description:
 Arguments:
 
     State - Supplies a pointer to the I/O object state to destroy.
+
+    NonPaged - Supplies a boolean indicating whether or not the I/O object
+        was allocated from non-paged pool. Default is paged pool (FALSE).
 
 Return Value:
 

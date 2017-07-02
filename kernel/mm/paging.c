@@ -256,7 +256,7 @@ MmpPageInSharedSection (
     );
 
 KSTATUS
-MmpPageInCacheBackedSection (
+MmpPageInBackedSection (
     PIMAGE_SECTION ImageSection,
     UINTN PageOffset,
     PIO_BUFFER LockedIoBuffer
@@ -1146,13 +1146,13 @@ Return Value:
                                         LockedIoBuffer);
 
     //
-    // Handle image sections backed by page cache pages.
+    // Handle image sections backed by something.
     //
 
-    } else if ((ImageSection->Flags & IMAGE_SECTION_PAGE_CACHE_BACKED) != 0) {
-        Status = MmpPageInCacheBackedSection(ImageSection,
-                                             PageOffset,
-                                             LockedIoBuffer);
+    } else if ((ImageSection->Flags & IMAGE_SECTION_BACKED) != 0) {
+        Status = MmpPageInBackedSection(ImageSection,
+                                        PageOffset,
+                                        LockedIoBuffer);
 
     //
     // Otherwise handle default image sections. These have a backing image, but
@@ -1427,11 +1427,11 @@ Return Value:
         }
 
         //
-        // If the section is page cache backed and this page is using the page
-        // cache, then it can't be freed, as the page cache owns it.
+        // If the section is backed and this page is using the page cache, then
+        // it can't be freed, as the backing image owns it.
         //
 
-        if (((Section->Flags & IMAGE_SECTION_PAGE_CACHE_BACKED) != 0) &&
+        if (((Section->Flags & IMAGE_SECTION_BACKED) != 0) &&
             ((Section->DirtyPageBitmap[BitmapIndex] & BitmapMask) == 0)) {
 
             ASSERT((SwapOffset != 0) || (PagingEntry == NULL));
@@ -1736,7 +1736,7 @@ Return Value:
                 TraverseChildren = FALSE;
             }
 
-            MapFlags = MAP_FLAG_PAGABLE;
+            MapFlags = CurrentSection->MapFlags | MAP_FLAG_PAGABLE;
             if (VirtualAddress >= KERNEL_VA_START) {
                 MapFlags |= MAP_FLAG_GLOBAL;
 
@@ -2727,7 +2727,7 @@ Return Value:
     PVOID VirtualAddress;
 
     ASSERT(KeGetRunLevel() == RunLevelLow);
-    ASSERT((ImageSection->Flags & IMAGE_SECTION_PAGE_CACHE_BACKED) == 0);
+    ASSERT((ImageSection->Flags & IMAGE_SECTION_BACKED) == 0);
     ASSERT((ImageSection->Flags & IMAGE_SECTION_SHARED) == 0);
     ASSERT(ImageSection->ImageBacking.DeviceHandle == INVALID_HANDLE);
 
@@ -3106,7 +3106,7 @@ Return Value:
     VirtualAddress = ImageSection->VirtualAddress + (PageOffset << PageShift);
 
     ASSERT((ImageSection->Flags & IMAGE_SECTION_SHARED) != 0);
-    ASSERT((ImageSection->Flags & IMAGE_SECTION_PAGE_CACHE_BACKED) != 0);
+    ASSERT((ImageSection->Flags & IMAGE_SECTION_BACKED) != 0);
     ASSERT(ImageSection->Parent == NULL);
     ASSERT(LIST_EMPTY(&(ImageSection->ChildList)) != FALSE);
 
@@ -3204,14 +3204,13 @@ Return Value:
         //
 
         ASSERT(IoBuffer->FragmentCount == 1);
-        ASSERT(IoBuffer->Fragment[0].Size == MmPageSize());
 
         PageCacheEntry = MmGetIoBufferPageCacheEntry(IoBuffer, 0);
         PhysicalAddress = IoBuffer->Fragment[0].PhysicalAddress;
 
-        ASSERT(PageCacheEntry != NULL);
-        ASSERT(PhysicalAddress ==
-               IoGetPageCacheEntryPhysicalAddress(PageCacheEntry));
+        ASSERT((PageCacheEntry == NULL) ||
+               (PhysicalAddress ==
+                IoGetPageCacheEntryPhysicalAddress(PageCacheEntry, NULL)));
 
         //
         // Acquire the image section lock.
@@ -3306,7 +3305,6 @@ PageInSharedSectionEnd:
 
         if (ExistingPhysicalAddress == INVALID_PHYSICAL_ADDRESS) {
 
-            ASSERT(PageCacheEntry != NULL);
             ASSERT(PhysicalAddress != INVALID_PHYSICAL_ADDRESS);
 
             //
@@ -3315,7 +3313,7 @@ PageInSharedSectionEnd:
             // unnecessary page cache cleaning when the section is destroyed.
             //
 
-            MapFlags = MAP_FLAG_READ_ONLY;
+            MapFlags = ImageSection->MapFlags | MAP_FLAG_READ_ONLY;
             if (VirtualAddress >= KERNEL_VA_START) {
                 MapFlags |= MAP_FLAG_GLOBAL;
 
@@ -3358,7 +3356,6 @@ PageInSharedSectionEnd:
 
         if (LockedIoBuffer != NULL) {
 
-            ASSERT(PageCacheEntry != NULL);
             ASSERT((ExistingPhysicalAddress == INVALID_PHYSICAL_ADDRESS) ||
                    (ExistingPhysicalAddress == PhysicalAddress));
 
@@ -3377,10 +3374,21 @@ PageInSharedSectionEnd:
                                           IO_BUFFER_FLAG_KERNEL_MODE_DATA);
 
             if (KSUCCESS(Status)) {
-                MmIoBufferAppendPage(LockedIoBuffer,
-                                     PageCacheEntry,
-                                     NULL,
-                                     INVALID_PHYSICAL_ADDRESS);
+                if (PageCacheEntry != NULL) {
+                    MmIoBufferAppendPage(LockedIoBuffer,
+                                         PageCacheEntry,
+                                         NULL,
+                                         INVALID_PHYSICAL_ADDRESS);
+
+                } else {
+
+                    ASSERT(ExistingPhysicalAddress != INVALID_PHYSICAL_ADDRESS);
+
+                    Status = MmAppendIoBufferData(LockedIoBuffer,
+                                                  VirtualAddress,
+                                                  ExistingPhysicalAddress,
+                                                  1 << PageShift);
+                }
             }
         }
     }
@@ -3402,7 +3410,7 @@ PageInSharedSectionEnd:
 }
 
 KSTATUS
-MmpPageInCacheBackedSection (
+MmpPageInBackedSection (
     PIMAGE_SECTION ImageSection,
     UINTN PageOffset,
     PIO_BUFFER LockedIoBuffer
@@ -3412,8 +3420,8 @@ MmpPageInCacheBackedSection (
 
 Routine Description:
 
-    This routine pages a physical page in from a page file or the page cache.
-    This routine must be called at low level.
+    This routine pages a physical page in from a page file or an aligned
+    backing image. This routine must be called at low level.
 
 Arguments:
 
@@ -3459,6 +3467,7 @@ Return Value:
     PIMAGE_SECTION RootSection;
     KSTATUS Status;
     ULONG TruncateCount;
+    PVOID VirtualAddress;
 
     BitmapIndex = IMAGE_SECTION_BITMAP_INDEX(PageOffset);
     BitmapMask = IMAGE_SECTION_BITMAP_MASK(PageOffset);
@@ -3477,8 +3486,9 @@ Return Value:
     PageShift = MmPageShift();
     PageSize = MmPageSize();
     RootSection = NULL;
+    VirtualAddress = ImageSection->VirtualAddress + (PageOffset << PageShift);
 
-    ASSERT((ImageSection->Flags & IMAGE_SECTION_PAGE_CACHE_BACKED) != 0);
+    ASSERT((ImageSection->Flags & IMAGE_SECTION_BACKED) != 0);
 
     //
     // The presence of a locked I/O buffer indicates that the page should be
@@ -3548,13 +3558,13 @@ Return Value:
 
             ASSERT(IoBuffer != NULL);
             ASSERT(IoBuffer->FragmentCount == 1);
-            ASSERT(IoBuffer->Fragment[0].Size == MmPageSize());
 
             PageCacheEntry = MmGetIoBufferPageCacheEntry(IoBuffer, 0);
             PageCacheAddress = IoBuffer->Fragment[0].PhysicalAddress;
 
-            ASSERT(PageCacheAddress ==
-                   IoGetPageCacheEntryPhysicalAddress(PageCacheEntry));
+            ASSERT((PageCacheEntry == NULL) ||
+                   (PageCacheAddress ==
+                    IoGetPageCacheEntryPhysicalAddress(PageCacheEntry, NULL)));
 
             //
             // Reset or initialize the locked page cache I/O buffer for use.
@@ -3581,10 +3591,22 @@ Return Value:
             // a reference on the page cache entry.
             //
 
-            MmIoBufferAppendPage(LockedPageCacheIoBuffer,
-                                 PageCacheEntry,
-                                 NULL,
-                                 INVALID_PHYSICAL_ADDRESS);
+            if (PageCacheEntry != NULL) {
+                MmIoBufferAppendPage(LockedPageCacheIoBuffer,
+                                     PageCacheEntry,
+                                     NULL,
+                                     INVALID_PHYSICAL_ADDRESS);
+
+            } else {
+                Status = MmAppendIoBufferData(LockedPageCacheIoBuffer,
+                                              VirtualAddress,
+                                              PageCacheAddress,
+                                              PageSize);
+
+                if (!KSUCCESS(Status)) {
+                    goto PageInCacheBackedSectionEnd;
+                }
+            }
         }
 
         //
@@ -3747,13 +3769,13 @@ Return Value:
         //
 
         ASSERT(IoBuffer->FragmentCount == 1);
-        ASSERT(IoBuffer->Fragment[0].Size == MmPageSize());
 
         PageCacheEntry = MmGetIoBufferPageCacheEntry(IoBuffer, 0);
         PageCacheAddress = IoBuffer->Fragment[0].PhysicalAddress;
 
-        ASSERT(PageCacheAddress ==
-               IoGetPageCacheEntryPhysicalAddress(PageCacheEntry));
+        ASSERT((PageCacheEntry == NULL) ||
+               (PageCacheAddress ==
+                IoGetPageCacheEntryPhysicalAddress(PageCacheEntry, NULL)));
 
         //
         // Store the page cache entry in the locked I/O buffer.
@@ -3776,10 +3798,22 @@ Return Value:
                 }
             }
 
-            MmIoBufferAppendPage(LockedPageCacheIoBuffer,
-                                 PageCacheEntry,
-                                 NULL,
-                                 INVALID_PHYSICAL_ADDRESS);
+            if (PageCacheEntry != NULL) {
+                MmIoBufferAppendPage(LockedPageCacheIoBuffer,
+                                     PageCacheEntry,
+                                     NULL,
+                                     INVALID_PHYSICAL_ADDRESS);
+
+            } else {
+                Status = MmAppendIoBufferData(LockedPageCacheIoBuffer,
+                                              VirtualAddress,
+                                              PageCacheAddress,
+                                              PageSize);
+
+                if (!KSUCCESS(Status)) {
+                    goto PageInCacheBackedSectionEnd;
+                }
+            }
         }
 
         //
@@ -3941,7 +3975,6 @@ PageInCacheBackedSectionEnd:
 
             } else {
 
-                ASSERT(PageCacheEntry != NULL);
                 ASSERT(PageCacheAddress == ExistingPhysicalAddress);
                 ASSERT(LockedPageCacheIoBuffer != NULL);
 
@@ -4101,7 +4134,7 @@ Return Value:
     PVOID VirtualAddress;
 
     ASSERT(KeIsQueuedLockHeld(Section->Lock) != FALSE);
-    ASSERT((Section->Flags & IMAGE_SECTION_PAGE_CACHE_BACKED) != 0);
+    ASSERT((Section->Flags & IMAGE_SECTION_BACKED) != 0);
 
     OwningSection = NULL;
     PageShift = MmPageShift();
@@ -4246,7 +4279,7 @@ Return Value:
     RootSection = NULL;
     VirtualAddress = ImageSection->VirtualAddress + (PageOffset << PageShift);
 
-    ASSERT((ImageSection->Flags & IMAGE_SECTION_PAGE_CACHE_BACKED) == 0);
+    ASSERT((ImageSection->Flags & IMAGE_SECTION_BACKED) == 0);
 
     //
     // Loop trying to page into the section.
@@ -5102,7 +5135,7 @@ Return Value:
 
     ASSERT(IoGetCacheEntryDataSize() == PageSize);
 
-    if (((Section->Flags & IMAGE_SECTION_PAGE_CACHE_BACKED) == 0) &&
+    if (((Section->Flags & IMAGE_SECTION_BACKED) == 0) &&
         (IS_ALIGNED(ReadOffset, PageSize) == FALSE)) {
 
         ReadSize = 2 << PageShift;
@@ -5452,7 +5485,7 @@ Return Value:
         // cache then the page cannot be marked writable.
         //
 
-        if (((Flags & IMAGE_SECTION_PAGE_CACHE_BACKED) != 0) &&
+        if (((Flags & IMAGE_SECTION_BACKED) != 0) &&
             ((Section->DirtyPageBitmap[BitmapIndex] & BitmapMask) == 0)) {
 
             CanWrite = FALSE;

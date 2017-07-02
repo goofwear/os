@@ -29,13 +29,14 @@ include $(SRCDIR)/../common
 
 BINARY = bcm2709.a
 
-BINARYTYPE = library
+BINARYTYPE = klibrary
 
 OBJS = gpio.o     \
        init.o     \
        intr.o     \
        mailbox.o  \
        memmap.o   \
+       pwm.o      \
        sd.o       \
        serial.o   \
        timer.o    \

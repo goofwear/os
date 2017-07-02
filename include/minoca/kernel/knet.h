@@ -213,6 +213,7 @@ Author:
 //
 
 #define SOCKET_INTERNET_PROTOCOL_ICMP 1
+#define SOCKET_INTERNET_PROTOCOL_IGMP 2
 #define SOCKET_INTERNET_PROTOCOL_IPV4 4
 #define SOCKET_INTERNET_PROTOCOL_TCP 6
 #define SOCKET_INTERNET_PROTOCOL_UDP 17
@@ -277,6 +278,12 @@ Author:
 #define SOCKET_FLAG_RECEIVE_TIMEOUT_SET 0x00000002
 
 //
+// Define the size of an ethernet address.
+//
+
+#define ETHERNET_ADDRESS_SIZE 6
+
+//
 // ------------------------------------------------------ Data Type Definitions
 //
 
@@ -326,6 +333,7 @@ typedef struct _NETWORK_ADDRESS {
 
 typedef enum _SOCKET_INFORMATION_TYPE {
     SocketInformationBasic = 0xFFFF,
+    SocketInformationIgmp = SOCKET_INTERNET_PROTOCOL_IGMP,
     SocketInformationIp4 = SOCKET_INTERNET_PROTOCOL_IPV4,
     SocketInformationIp6 = SOCKET_INTERNET_PROTOCOL_IPV6,
     SocketInformationTcp = SOCKET_INTERNET_PROTOCOL_TCP,
@@ -543,7 +551,8 @@ Values:
         group. This option takes a SOCKET_IP4_MULTICAST_REQUEST structure.
 
     SocketIp4OptionLeaveMulticastGroup - Indicates a request to leave a
-        multicast group. This option takes a SOCKET_MULTICAST_REQUEST structure.
+        multicast group. This option takes a SOCKET_IP4_MULTICAST_REQUEST
+        structure.
 
     SocketIp4OptionMulticastInterface - Indicates the network interface to use
         for multicast messages. This option takes a ULONG.
@@ -558,6 +567,10 @@ Values:
     SocketIp4OptionTimeToLive - Indicates the time-to-live value for all
         unicast packets sent from the socket. This option takes a ULONG.
 
+    SocketIp4DifferentiatedServicesCodePoint - Indicates the differentiated
+        services code point (DSCP) for all packets set from the socket. This
+        option takes a ULONG.
+
 --*/
 
 typedef enum _SOCKET_IP4_OPTION {
@@ -568,7 +581,8 @@ typedef enum _SOCKET_IP4_OPTION {
     SocketIp4OptionMulticastInterface,
     SocketIp4OptionMulticastTimeToLive,
     SocketIp4OptionMulticastLoopback,
-    SocketIp4OptionTimeToLive
+    SocketIp4OptionTimeToLive,
+    SocketIp4DifferentiatedServicesCodePoint
 } SOCKET_IP4_OPTION, *PSOCKET_IP4_OPTION;
 
 /*++
@@ -583,8 +597,8 @@ Members:
 
     Address - Stores the address of the multicast group to join or leave.
 
-    Interface - Stores the index of the network interfaces that is to join or
-        leave the multicast group.
+    Interface - Stores the IPv4 address of the network interface that is to
+        join or leave the multicast group.
 
 --*/
 
@@ -734,7 +748,7 @@ typedef struct _SOCKET {
     NET_DOMAIN_TYPE Domain;
     NET_SOCKET_TYPE Type;
     ULONG Protocol;
-    UINTN ReferenceCount;
+    ULONG ReferenceCount;
     PIO_OBJECT_STATE IoState;
     PIO_HANDLE IoHandle;
     ULONG Flags;

@@ -40,6 +40,7 @@ APPS = ck       \
        swiss    \
        testapps \
        tzcomp   \
+       tzset    \
        unmount  \
        vmstat   \
 
@@ -56,5 +57,5 @@ libc: osbase
 $(APPS): libc lib netlink
 lib: libc
 netlink: libc
-setup: ck
+setup mingen: ck
 

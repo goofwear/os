@@ -43,6 +43,9 @@ var EFI_DEFAULT_APP;
 if (arch == "x86") {
     EFI_DEFAULT_APP = "BOOTIA32.EFI";
 
+} else if (arch == "x64") {
+    EFI_DEFAULT_APP = "BOOTX64.EFI";
+
 } else if ((arch == "armv7") || (arch == "armv6")) {
     EFI_DEFAULT_APP = "BOOTARM.EFI";
 }
@@ -107,17 +110,20 @@ var DriverFiles = [
     "ser16550.drv",
     "sd.drv",
     "smsc95xx.drv",
+    "sound.drv",
     "special.drv",
     "usbcomp.drv",
     "usbcore.drv",
+    "usbhid.drv",
     "usbhub.drv",
     "usbkbd.drv",
     "usbmass.drv",
+    "usbmouse.drv",
     "usrinput.drv",
     "videocon.drv",
 ];
 
-if (arch == "x86") {
+if ((arch == "x86") || (arch == "x64")) {
     DriverFiles += [
         "ahci.drv",
         "ata.drv",
@@ -126,6 +132,7 @@ if (arch == "x86") {
         "e100.drv",
         "e1000.drv",
         "i8042.drv",
+        "intelhda.drv",
         "rtl81xx.drv",
         "uhci.drv",
         "pcnet32.drv",
@@ -134,6 +141,7 @@ if (arch == "x86") {
 } else if ((arch == "armv7") || (arch == "armv6")) {
     DriverFiles += [
         "dma.drv",
+        "elani2c.drv",
         "gpio.drv",
         "spb.drv",
     ];
@@ -148,7 +156,7 @@ var BootDrivers = [
     "videocon.drv",
 ];
 
-if (arch == "x86") {
+if ((arch == "x86") || (arch == "x64")) {
     BootDrivers += [
         "ahci.drv",
         "ata.drv",
@@ -166,8 +174,6 @@ var SystemConfigFiles = [
     "devmap.set",
     "init.set",
     "init.sh",
-    "tzdata",
-    "tzdflt",
 ];
 
 var SystemFiles = [
@@ -183,6 +189,17 @@ var SystemFilesX86Pcat = [
     "bootman.bin",
     "loader",
 ];
+
+//
+// TODO: Remove this once the whole world compiles for x64.
+//
+
+if (arch == "x64") {
+    SystemFiles = [
+        "kernel",
+        "libminocaos.so.1"
+    ];
+}
 
 //
 // Copy commands
@@ -243,6 +260,14 @@ var TotalCopy = [
     UserSkelCopy,
     UserAppsCopy
 ];
+
+//
+// TODO: Remove this once the whole world compiles for x64.
+//
+
+if (arch == "x64") {
+    TotalBootCopy = [];
+}
 
 //
 // Partition descriptions
@@ -343,7 +368,7 @@ var Settings = {
 //
 
 if (plat == "beagleboneblack") {
-    DriverFiles += [
+    DriversCopy["Files"] += [
         "am3eth.drv",
         "am3i2c.drv",
         "am3soc.drv",
@@ -353,7 +378,7 @@ if (plat == "beagleboneblack") {
         "tps65217.drv",
     ];
 
-    BootDrivers += [
+    DriverDb["BootDrivers"] += [
         "am3soc.drv",
         "edma3.drv",
         "sdomap4.drv",
@@ -414,11 +439,11 @@ if (plat == "beagleboneblack") {
 //
 
 if (plat == "galileo") {
-    DriverFiles += [
+    DriversCopy["Files"] += [
         "qrkhostb.drv",
     ];
 
-    BootDrivers += [
+    DriverDb["BootDrivers"] += [
         "qrkhostb.drv",
     ];
 
@@ -458,6 +483,7 @@ if (plat == "install-armv6") {
         "am3usb.drv",
         "ata.drv",
         "bc27gpio.drv",
+        "bc27pwma.drv",
         "bootmefi.efi",
         "dev2drv.set",
         "devmap.set",
@@ -466,6 +492,7 @@ if (plat == "install-armv6") {
         "dmab2709.drv",
         "dwhci.drv",
         "ehci.drv",
+        "elani2c.drv",
         "fat.drv",
         "goec.drv",
         "gpio.drv",
@@ -501,16 +528,17 @@ if (plat == "install-armv6") {
         "ser16550.drv",
         "smsc91c1.drv",
         "smsc95xx.drv",
+        "sound.drv",
         "spb.drv",
         "special.drv",
         "tps65217.drv",
-        "tzdata",
-        "tzdflt",
         "usbcomp.drv",
         "usbcore.drv",
+        "usbhid.drv",
         "usbhub.drv",
         "usbkbd.drv",
         "usbmass.drv",
+        "usbmouse.drv",
         "usrinput.drv",
         "videocon.drv",
     ];
@@ -580,6 +608,7 @@ if (plat == "install-armv7") {
         "bbonefw",
         "bbonemlo",
         "bc27gpio.drv",
+        "bc27pwma.drv",
         "bootmefi.efi",
         "dev2drv.set",
         "devmap.set",
@@ -589,6 +618,7 @@ if (plat == "install-armv7") {
         "dwhci.drv",
         "edma3.drv",
         "ehci.drv",
+        "elani2c.drv",
         "fat.drv",
         "goec.drv",
         "gpio.drv",
@@ -628,16 +658,17 @@ if (plat == "install-armv7") {
         "ser16550.drv",
         "smsc91c1.drv",
         "smsc95xx.drv",
+        "sound.drv",
         "spb.drv",
         "special.drv",
         "tps65217.drv",
-        "tzdata",
-        "tzdflt",
         "usbcomp.drv",
         "usbcore.drv",
+        "usbhid.drv",
         "usbhub.drv",
         "usbkbd.drv",
         "usbmass.drv",
+        "usbmouse.drv",
         "usrinput.drv",
         "veyronfw",
         "videocon.drv",
@@ -690,7 +721,7 @@ if (plat == "install-armv7") {
 // x86 install image
 //
 
-if (plat == "install-x86") {
+if ((plat == "install-x86") || (plat == "install-x64")) {
 
     //
     // List all the files in the bin directory that are ever installed
@@ -717,6 +748,7 @@ if (plat == "install-x86") {
         "init.set",
         "init.sh",
         "install.ck",
+        "intelhda.drv",
         "kernel",
         "kernel-version",
         "libc.so.1",
@@ -741,18 +773,84 @@ if (plat == "install-x86") {
         "sd.drv",
         "ser16550.drv",
         "smsc95xx.drv",
+        "sound.drv",
         "special.drv",
-        "tzdata",
-        "tzdflt",
         "uhci.drv",
         "usbcomp.drv",
         "usbcore.drv",
+        "usbhid.drv",
         "usbhub.drv",
         "usbkbd.drv",
         "usbmass.drv",
+        "usbmouse.drv",
         "usrinput.drv",
         "videocon.drv",
     ];
+
+    //
+    // TODO: Remove this once the whole world compiles for x64.
+    //
+
+    if (plat == "install-x64") {
+        Files = [
+            "acpi.drv",
+            "ahci.drv",
+            "ata.drv",
+            "atl1c.drv",
+            "bootman.bin",
+            //"bootmefi.efi",
+            "dev2drv.set",
+            "devmap.set",
+            "devrem.drv",
+            "dwceth.drv",
+            "e100.drv",
+            "e1000.drv",
+            "ehci.drv",
+            "fat.drv",
+            "fatboot.bin",
+            "i8042.drv",
+            "init.set",
+            "init.sh",
+            "install.ck",
+            "intelhda.drv",
+            "kernel",
+            "kernel-version",
+            "libc.so.1",
+            "libcrypt.so.1",
+            "libminocaos.so.1",
+            "loader",
+            //"loadefi",
+            "mbr.bin",
+            "net80211.drv",
+            "netcore.drv",
+            "null.drv",
+            "onering.drv",
+            "part.drv",
+            "pci.drv",
+            "pcnet32.drv",
+            "qrkhostb.drv",
+            "rtl81xx.drv",
+            "rtlw81xx.drv",
+            "rtlw8188eufw.bin",
+            "rtlw8188cufwUMC.bin",
+            "rtlw8192cufw.bin",
+            "sd.drv",
+            "ser16550.drv",
+            "smsc95xx.drv",
+            "sound.drv",
+            "special.drv",
+            "uhci.drv",
+            "usbcomp.drv",
+            "usbcore.drv",
+            "usbhid.drv",
+            "usbhub.drv",
+            "usbkbd.drv",
+            "usbmass.drv",
+            "usbmouse.drv",
+            "usrinput.drv",
+            "videocon.drv",
+        ];
+    }
 
     Files += [
         "skel/"
@@ -801,13 +899,13 @@ if (plat == "install-x86") {
 //
 
 if (plat == "integrd") {
-    DriverFiles += [
+    DriversCopy["Files"] += [
         "ramdisk.drv",
         "pl050.drv",
         "smsc91c1.drv",
     ];
 
-    BootDrivers += [
+    DriverDb["BootDrivers"] += [
         "ramdisk.drv",
     ];
 
@@ -830,12 +928,12 @@ if (plat == "integrd") {
 //
 
 if ((plat == "panda") || (plat == "panda-es")) {
-    DriverFiles += [
+    DriversCopy["Files"] += [
         "sdomap4.drv",
         "om4gpio.drv",
     ];
 
-    BootDrivers += [
+    DriverDb["BootDrivers"] += [
         "sdomap4.drv",
     ];
 
@@ -865,8 +963,8 @@ if ((plat == "panda") || (plat == "panda-es")) {
         "SourceVolume": 0,
     };
 
-    TotalCopy += [PandaFirmwareSystemCopy];
-    TotalBootCopy += [PandaFirmwareCopy];
+    TotalCopy.append(PandaFirmwareSystemCopy);
+    TotalBootCopy.append(PandaFirmwareCopy);
 
     //
     // Set the MBR file.
@@ -894,14 +992,14 @@ if ((plat == "panda") || (plat == "panda-es")) {
 //
 
 if (plat == "panda-usb") {
-    DriverFiles += [
+    DriversCopy["Files"] += [
         "ramdisk.drv",
         "om4gpio.drv",
         "sdomap4.drv",
         "smsc91c1.drv",
     ];
 
-    BootDrivers += [
+    DriverDb["BootDrivers"] += [
         "ramdisk.drv",
     ];
 
@@ -917,21 +1015,22 @@ if (plat == "panda-usb") {
     //
 
     BootmefiCopy["Destination"] += EFI_DEFAULT_APP;
-    BootPartition["Size"] = 2 * MEGABYTE;
+    BootPartition["Size"] = 3 * MEGABYTE;
     SystemPartition["Size"] = 20 * MEGABYTE;
 }
 
 //
 // PC (BIOS) image
+// TODO: Remove pc64 once x64 compiles enough to match x86.
 //
 
-if (plat == "pc") {
+if ((plat == "pc") || (plat == "pc64")) {
 
     //
     // Copy the firmware to the system partition for recovery if needed.
     //
 
-    SystemFiles += SystemFilesX86Pcat;
+    SystemCopy["Files"] += SystemFilesX86Pcat;
 
     //
     // Set the MBR file.
@@ -987,7 +1086,7 @@ if (plat == "pcefi") {
     // Add the BIOS files anyway for machines with a BIOS compatibility module.
     //
 
-    SystemFiles += SystemFilesX86Pcat;
+    SystemCopy["Files"] += SystemFilesX86Pcat;
     BootmefiCopy["Destination"] += EFI_DEFAULT_APP;
     BootPartition["Alignment"] = 1 * MEGABYTE;
     SystemPartition["Alignment"] = 1 * MEGABYTE;
@@ -1016,7 +1115,6 @@ if (plat == "pc-tiny") {
         "videocon.drv",
         "ata.drv",
         "e100.drv",
-        "e1000.drv",
         "i8042.drv",
     ];
 
@@ -1035,7 +1133,7 @@ if (plat == "pc-tiny") {
     // Copy the firmware to the system partition for recovery if needed.
     //
 
-    SystemFiles += SystemFilesX86Pcat;
+    SystemCopy["Files"] += SystemFilesX86Pcat;
 
     //
     // Remove apps from the user files since it can be huge. Just add the bare
@@ -1108,14 +1206,15 @@ if (plat == "pc-tiny") {
 //
 
 if (plat == "raspberrypi") {
-    DriverFiles += [
+    DriversCopy["Files"] += [
         "dwhci.drv",
         "dmab2709.drv",
         "sdbm2709.drv",
         "bc27gpio.drv",
+        "bc27pwma.drv",
     ];
 
-    BootDrivers += [
+    DriverDb["BootDrivers"] += [
         "dmab2709.drv",
         "sdbm2709.drv",
     ];
@@ -1162,8 +1261,10 @@ if (plat == "raspberrypi") {
         "SourceVolume": 0,
     };
 
-    TotalCopy += [RpiFirmwareBlobsSystemCopy, RpiFirmwareSystemCopy];
-    TotalBootCopy += [RpiFirmwareBlobsCopy, RpiFirmwareCopy];
+    TotalCopy.append(RpiFirmwareBlobsSystemCopy);
+    TotalCopy.append(RpiFirmwareSystemCopy);
+    TotalBootCopy.append(RpiFirmwareBlobsCopy);
+    TotalBootCopy.append(RpiFirmwareCopy);
     DiskData["Format"] = PARTITION_FORMAT_MBR;
 
     //
@@ -1180,14 +1281,15 @@ if (plat == "raspberrypi") {
 //
 
 if (plat == "raspberrypi2") {
-    DriverFiles += [
+    DriversCopy["Files"] += [
         "dwhci.drv",
         "dmab2709.drv",
         "sdbm2709.drv",
         "bc27gpio.drv",
+        "bc27pwma.drv",
     ];
 
-    BootDrivers += [
+    DriverDb["BootDrivers"] += [
         "dmab2709.drv",
         "sdbm2709.drv",
     ];
@@ -1239,8 +1341,10 @@ if (plat == "raspberrypi2") {
         "SourceVolume": 0
     };
 
-    TotalCopy += [RpiFirmwareSystemCopy, Rpi2FirmwareSystemCopy];
-    TotalBootCopy += [RpiFirmwareCopy, Rpi2FirmwareCopy];
+    TotalCopy.append(RpiFirmwareSystemCopy);
+    TotalCopy.append(Rpi2FirmwareSystemCopy);
+    TotalBootCopy.append(RpiFirmwareCopy);
+    TotalBootCopy.append(Rpi2FirmwareCopy);
     DiskData["Format"] = PARTITION_FORMAT_MBR;
 
     //
@@ -1253,7 +1357,7 @@ if (plat == "raspberrypi2") {
 }
 
 if (plat == "veyron") {
-    DriverFiles += [
+    DriversCopy["Files"] += [
         "dwhci.drv",
         "sdrk32xx.drv",
         "rk32spi.drv",
@@ -1268,7 +1372,7 @@ if (plat == "veyron") {
     // changes via the PMIC.
     //
 
-    BootDrivers += [
+    DriverDb["BootDrivers"] += [
         "sdrk32xx.drv",
         "rk32gpio.drv",
         "rk3i2c.drv",
@@ -1304,7 +1408,7 @@ if (plat == "veyron") {
 
     BootPartition["Index"] += 1;
     SystemPartition["Index"] += 1;
-    Partitions += [VeyronFirmwarePartition];
+    Partitions.append(VeyronFirmwarePartition);
 
     //
     // Copy the firmware to the system partition for recovery if needed.
@@ -1321,7 +1425,7 @@ if (plat == "veyron") {
         "Files": VeyronFirmwareFiles
     };
 
-    TotalCopy += [VeyronFirmwareSystemCopy];
+    TotalCopy.append(VeyronFirmwareSystemCopy);
 
     //
     // Set the EFI boot manager name.

@@ -38,6 +38,12 @@ Environment:
 //
 
 //
+// Define the maximum port value that requires special bind permission.
+//
+
+#define NET_PORT_PERMISSIONS_MAX 1023
+
+//
 // ------------------------------------------------------ Data Type Definitions
 //
 
@@ -294,6 +300,7 @@ NET_SOCKET_OPTION NetBasicSocketOptions[] = {
 // ------------------------------------------------------------------ Functions
 //
 
+__USED
 KSTATUS
 DriverEntry (
     PDRIVER Driver
@@ -362,6 +369,7 @@ Return Value:
     NetpUdpInitialize();
     NetpTcpInitialize();
     NetpRawInitialize();
+    NetpIgmpInitialize();
     NetpDhcpInitialize();
     NetpNetlinkInitialize();
     NetpNetlinkGenericInitialize(0);
@@ -887,7 +895,7 @@ Return Value:
         (NewDataLinkEntry->Interface.DestroyLink == NULL) ||
         (NewDataLinkEntry->Interface.Send == NULL) ||
         (NewDataLinkEntry->Interface.ProcessReceivedPacket == NULL) ||
-        (NewDataLinkEntry->Interface.GetBroadcastAddress == NULL) ||
+        (NewDataLinkEntry->Interface.ConvertToPhysicalAddress == NULL) ||
         (NewDataLinkEntry->Interface.PrintAddress == NULL) ||
         (NewDataLinkEntry->Interface.GetPacketSizeInformation == NULL)) {
 
@@ -1380,6 +1388,7 @@ Return Value:
     PNET_NETWORK_ENTRY NetworkEntry;
     BOOL NetworkFound;
     PNET_PROTOCOL_ENTRY ProtocolEntry;
+    ULONG ProtocolFlags;
     BOOL ProtocolFound;
     PNET_SOCKET Socket;
     KSTATUS Status;
@@ -1387,6 +1396,7 @@ Return Value:
     Socket = NULL;
     NetworkEntry = NULL;
     ProtocolEntry = NULL;
+    ProtocolFlags = 0;
 
     //
     // If the domain is not within the bounds of the socket portion of the
@@ -1401,7 +1411,9 @@ Return Value:
     //
     // Attempt to find a handler for this protocol and network. Make sure that
     // the supplied network protocol matches the found protocol entry's parent
-    // protocol. If not, then it's a protocol for a different network.
+    // protocol. If not, then it's a protocol for a different network. Skip
+    // this check if the protocol entry specifies that it will match any given
+    // protocol value.
     //
 
     ProtocolFound = FALSE;
@@ -1415,8 +1427,9 @@ Return Value:
             continue;
         }
 
-        if ((Type != NetSocketRaw) &&
-            (Protocol != 0) &&
+        ProtocolFlags = ProtocolEntry->Flags;
+        if ((Protocol != 0) &&
+            ((ProtocolFlags & NET_PROTOCOL_FLAG_MATCH_ANY_PROTOCOL) == 0) &&
             (ProtocolEntry->ParentProtocolNumber != Protocol)) {
 
             continue;
@@ -1448,7 +1461,15 @@ Return Value:
         goto CreateSocketEnd;
     }
 
-    if (Protocol == 0) {
+    //
+    // A supplied protocol value of 0 typically indicates that the default
+    // protocol value should be set. There are some protocol entries, however,
+    // that may actually want 0 to be supplied to socket creation.
+    //
+
+    if ((Protocol == 0) &&
+        ((ProtocolFlags & NET_PROTOCOL_FLAG_NO_DEFAULT_PROTOCOL) == 0)) {
+
         Protocol = ProtocolEntry->ParentProtocolNumber;
     }
 
@@ -1459,7 +1480,8 @@ Return Value:
     Status = ProtocolEntry->Interface.CreateSocket(ProtocolEntry,
                                                    NetworkEntry,
                                                    Protocol,
-                                                   &Socket);
+                                                   &Socket,
+                                                   0);
 
     if (!KSUCCESS(Status)) {
         goto CreateSocketEnd;
@@ -1476,6 +1498,21 @@ Return Value:
     RtlCopyMemory(&(Socket->UnboundPacketSizeInformation),
                   &(Socket->PacketSizeInformation),
                   sizeof(NET_PACKET_SIZE_INFORMATION));
+
+    //
+    // Allow the protocol a chance to do more work now that the socket is
+    // initialized by netcore.
+    //
+
+    Status = ProtocolEntry->Interface.CreateSocket(ProtocolEntry,
+                                                   NetworkEntry,
+                                                   Protocol,
+                                                   &Socket,
+                                                   1);
+
+    if (!KSUCCESS(Status)) {
+        goto CreateSocketEnd;
+    }
 
 CreateSocketEnd:
     if (!KSUCCESS(Status)) {
@@ -1574,9 +1611,28 @@ Return Value:
 {
 
     PNET_SOCKET NetSocket;
+    ULONG ProtocolFlags;
     KSTATUS Status;
 
+    //
+    // If the port is non-zero and less than or equal to the maximum port that
+    // requires a permission check, make sure the thread as the right
+    // privilege. Some protocols do not have this geneirc port restriction and
+    // can opt out of the check.
+    //
+
     NetSocket = (PNET_SOCKET)Socket;
+    ProtocolFlags = NetSocket->Protocol->Flags;
+    if ((Address->Port != 0) &&
+        (Address->Port <= NET_PORT_PERMISSIONS_MAX) &&
+        (ProtocolFlags & NET_PROTOCOL_FLAG_NO_BIND_PERMISSIONS) == 0) {
+
+        Status = PsCheckPermission(PERMISSION_NET_BIND);
+        if (!KSUCCESS(Status)) {
+            goto BindToAddressEnd;
+        }
+    }
+
     Status = NetSocket->Protocol->Interface.BindToAddress(NetSocket,
                                                           Link,
                                                           Address);
@@ -2101,16 +2157,10 @@ Return Value:
             // Acquire the lock to not return a torn address.
             //
 
-            if (NetSocket->KernelSocket.Type == NetSocketRaw) {
-                KeAcquireSharedExclusiveLockShared(NetRawSocketsLock);
-
-            } else {
-                KeAcquireSharedExclusiveLockShared(Protocol->SocketLock);
-            }
-
+            KeAcquireSharedExclusiveLockShared(Protocol->SocketLock);
             if (BasicOption == SocketBasicOptionLocalAddress) {
                 RtlCopyMemory(&Address,
-                              &(NetSocket->LocalAddress),
+                              &(NetSocket->LocalReceiveAddress),
                               sizeof(NETWORK_ADDRESS));
 
                 //
@@ -2122,31 +2172,25 @@ Return Value:
                     Address.Domain = NetSocket->KernelSocket.Domain;
                 }
 
-                //
-                // The port should be zero for all raw sockets. The address
-                // request returns the protocol as the port value.
-                //
-
-                if (NetSocket->KernelSocket.Type == NetSocketRaw) {
-                    Address.Port = NetSocket->KernelSocket.Protocol;
-                }
-
                 RtlCopyMemory(Data, &Address, *DataSize);
 
             } else {
 
                 ASSERT(BasicOption == SocketBasicOptionRemoteAddress);
 
-                RtlCopyMemory(Data, &(NetSocket->RemoteAddress), *DataSize);
+                //
+                // Fail if there is not a valid remote address.
+                //
+
+                if (NetSocket->RemoteAddress.Domain == NetDomainInvalid) {
+                    Status = STATUS_NOT_CONNECTED;
+
+                } else {
+                    RtlCopyMemory(Data, &(NetSocket->RemoteAddress), *DataSize);
+                }
             }
 
-            if (NetSocket->KernelSocket.Type == NetSocketRaw) {
-                KeReleaseSharedExclusiveLockShared(NetRawSocketsLock);
-
-            } else {
-                KeReleaseSharedExclusiveLockShared(Protocol->SocketLock);
-            }
-
+            KeReleaseSharedExclusiveLockShared(Protocol->SocketLock);
             break;
 
         case SocketBasicOptionReuseAnyAddress:
@@ -2220,6 +2264,19 @@ Return Value:
             break;
 
         case SocketBasicOptionDebug:
+
+            //
+            // Administrator priveleges are required to change the debug
+            // option.
+            //
+
+            if (Set != FALSE) {
+                Status = PsCheckPermission(PERMISSION_NET_ADMINISTRATOR);
+                if (!KSUCCESS(Status)) {
+                    break;
+                }
+            }
+
         case SocketBasicOptionInlineOutOfBand:
         case SocketBasicOptionRoutingDisabled:
 

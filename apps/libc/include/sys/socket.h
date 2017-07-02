@@ -29,6 +29,7 @@ Author:
 //
 
 #include <sys/uio.h>
+#include <sys/ioctl.h>
 
 //
 // --------------------------------------------------------------------- Macros
@@ -104,6 +105,7 @@ extern "C" {
 #define AF_LOCAL  AF_UNIX
 #define AF_INET   2
 #define AF_INET6  3
+#define AF_LINK   5
 
 //
 // Define valid protocol families as the same as the address families.
@@ -114,6 +116,7 @@ extern "C" {
 #define PF_LOCAL  AF_LOCAL
 #define PF_INET   AF_INET
 #define PF_INET6  AF_INET6
+#define PF_LINK   AF_LINK
 
 //
 // Define the socket types.
@@ -448,6 +451,13 @@ extern "C" {
 //
 
 #define SIOCATMARK 0x7300
+
+//
+// This ioctl returns the amount of unread data in the receive buffer for
+// stream sockets.
+//
+
+#define SIOCINQ FIONREAD
 
 //
 // Define the maximum length of the connection backlog queue for listen calls

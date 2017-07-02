@@ -38,6 +38,7 @@ Environment:
 #include <limits.h>
 #include <netdb.h>
 #include <poll.h>
+#include <stdlib.h>
 #include "net.h"
 
 //
@@ -759,6 +760,17 @@ Return Value:
 
                 goto getaddrinfoEnd;
             }
+        }
+
+        //
+        // TODO: Remove this when IPv6 is supported. Allowing the IPv6
+        // translation is problematic because the name servers returned may
+        // also be IPv6 addresses, causing the translation to fail rather than
+        // fall back to IPv4.
+        //
+
+        if (Family == AF_UNSPEC) {
+            Family = AF_INET;
         }
 
         //

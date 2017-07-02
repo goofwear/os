@@ -115,6 +115,7 @@ PDRIVER PcnetDriver = NULL;
 // ------------------------------------------------------------------ Functions
 //
 
+__USED
 KSTATUS
 DriverEntry (
     PDRIVER Driver
@@ -504,6 +505,7 @@ Return Value:
     }
 
     Properties.PhysicalAddress.Domain = NetDomainEthernet;
+    Properties.Capabilities = Device->SupportedCapabilities;
     RtlCopyMemory(&(Properties.PhysicalAddress.Address),
                   &(Device->EepromMacAddress),
                   sizeof(Device->EepromMacAddress));

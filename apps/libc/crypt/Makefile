@@ -32,13 +32,13 @@ BINARYTYPE = so
 
 BINPLACE = bin
 
-ENTRY := 0
-
 INCLUDES += $(SRCROOT)/os/apps/libc/include;
 
 OBJS = crypt.o          \
 
 DYNLIBS = $(BINROOT)/libc.so.1           \
+
+EXTRA_LDFLAGS += -nostdlib
 
 include $(SRCROOT)/os/minoca.mk
 

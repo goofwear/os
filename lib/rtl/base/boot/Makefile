@@ -28,7 +28,7 @@
 
 BINARY = basertlb.a
 
-BINARYTYPE = library
+BINARYTYPE = klibrary
 
 INCLUDES += $(SRCDIR)/../..;
 
@@ -52,7 +52,19 @@ ARMV7_OBJS = armv7/aeabisfp.o      \
 
 ARMV6_OBJS = $(ARMV7_OBJS)
 
+##
+## This must be non-lto because otherwise for reasons not fully understood the
+## intrinsic functions (like __aeabi_uidiv and __divdi3) get optimized away
+## and leave the linker with undefined references to them.
+##
+
+LTO_OPT = -fno-lto
+
 EXTRA_SRC_DIRS = x86 x64 armv7 boot/armv7
+
+ifeq ($(ARCH),x64)
+DIRS += x6432
+endif
 
 include $(SRCROOT)/os/minoca.mk
 

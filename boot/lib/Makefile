@@ -27,13 +27,17 @@
 
 DIRS = efi
 
-ifeq ($(ARCH), x86)
+##
+## PC/AT is compiled for x86 and x64.
+##
+
+ifneq (,$(filter x86 x64,$(ARCH)))
 
 DIRS += pcat
 
 endif
 
-EXTRA_SRC_DIRS = x86 armv7 armv6
+EXTRA_SRC_DIRS = x86 x64 armv7 armv6
 
 include $(SRCROOT)/os/minoca.mk
 

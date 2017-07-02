@@ -29,21 +29,13 @@
 
 BINARY = kd.a
 
-BINARYTYPE = library
+BINARYTYPE = klibrary
 
-OBJS = kdebug.o   \
+include $(SRCDIR)/sources
 
-ARMV7_OBJS = armv7/kdarch.o   \
-             armv7/kdatomic.o \
-             armv7/kdsup.o    \
-             armv7/kdsupc.o   \
+ARMV7_OBJS += armv7/kdatomic.o \
 
-ARMV6_OBJS = $(ARMV7_OBJS)
-
-X86_OBJS = x86/kdarch.o   \
-           x86/kdsup.o    \
-
-EXTRA_SRC_DIRS = x86 armv7 armv6
+EXTRA_SRC_DIRS = x86 x64 armv7 armv6
 
 DIRS = boot kdusb
 

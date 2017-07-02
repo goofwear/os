@@ -28,18 +28,20 @@
 
 BINARY = sp.a
 
-BINARYTYPE = library
+BINARYTYPE = klibrary
 
 OBJS = info.o \
        profiler.o \
 
 X86_OBJS = x86/archprof.o \
 
+X64_OBJS = x64/archprof.o \
+
 ARMV7_OBJS = armv7/archprof.o \
 
 ARMV6_OBJS = armv7/archprof.o \
 
-EXTRA_SRC_DIRS = x86 armv7
+EXTRA_SRC_DIRS = x86 x64 armv7
 
 include $(SRCROOT)/os/minoca.mk
 

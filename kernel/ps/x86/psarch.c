@@ -85,7 +85,7 @@ PspIsSysenterTrapFrame (
 // for a newly created thread.
 //
 
-ULONGLONG PsInitialThreadPointer = X86_INITIAL_THREAD_POINTER;
+const ULONGLONG PsInitialThreadPointer = X86_INITIAL_THREAD_POINTER;
 
 //
 // ------------------------------------------------------------------ Functions

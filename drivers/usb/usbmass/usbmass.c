@@ -892,6 +892,7 @@ DISK_INTERFACE UsbMassDiskInterfaceTemplate = {
 // ------------------------------------------------------------------ Functions
 //
 
+__USED
 KSTATUS
 DriverEntry (
     PDRIVER Driver
@@ -1539,7 +1540,7 @@ Return Value:
             // Enable opening of the root as a single file.
             //
 
-            Properties = &(Lookup->Properties);
+            Properties = Lookup->Properties;
             Properties->FileId = 0;
             Properties->Type = IoObjectBlockDevice;
             Properties->HardLinkCount = 1;
@@ -1551,7 +1552,7 @@ Return Value:
             FileSize = (ULONGLONG)Disk->BlockCount <<
                        (ULONGLONG)Disk->BlockShift;
 
-            WRITE_INT64_SYNC(&(Properties->FileSize), FileSize);
+            Properties->Size = FileSize;
             Status = STATUS_SUCCESS;
         }
 
@@ -1566,7 +1567,7 @@ Return Value:
     case IrpMinorSystemControlWriteFileProperties:
         FileOperation = (PSYSTEM_CONTROL_FILE_OPERATION)Context;
         Properties = FileOperation->FileProperties;
-        READ_INT64_SYNC(&(Properties->FileSize), &PropertiesFileSize);
+        PropertiesFileSize = Properties->Size;
         FileSize = (ULONGLONG)Disk->BlockCount << (ULONGLONG)Disk->BlockShift;
         if ((Properties->FileId != 0) ||
             (Properties->Type != IoObjectBlockDevice) ||
@@ -2914,12 +2915,6 @@ Return Value:
     //
     // Send the INQUIRY for page 0 as a friendly "hello!".
     //
-
-    BufferSize = sizeof(SCSI_INQUIRY_PAGE0);
-    Status = UsbMasspSendInquiry(Disk, 0, (PVOID)&Page0, &BufferSize);
-    if (!KSUCCESS(Status)) {
-        goto StartDiskEnd;
-    }
 
     BufferSize = sizeof(SCSI_INQUIRY_PAGE0);
     Status = UsbMasspSendInquiry(Disk, 0, (PVOID)&Page0, &BufferSize);

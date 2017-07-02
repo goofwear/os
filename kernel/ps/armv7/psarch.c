@@ -81,7 +81,7 @@ PspArchGetNextPcReadMemory (
 // for a newly created thread.
 //
 
-ULONGLONG PsInitialThreadPointer = 0;
+const ULONGLONG PsInitialThreadPointer = 0;
 
 //
 // ------------------------------------------------------------------ Functions
@@ -496,7 +496,7 @@ Return Value:
 
     UINTN EntryPoint;
     ULONG Flags;
-    PULONG StackPointer;
+    PUINTN StackPointer;
     PTRAP_FRAME StackTrapFrame;
     PVOID UserStackPointer;
 
